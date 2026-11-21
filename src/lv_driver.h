@@ -16,6 +16,7 @@
 #include <Arduino.h>
 #include <lvgl.h>
 #include "HB9IIUdisplayInit.h"   // defines LGFX class and extern LGFX tft
+#include <esp32s3/rom/cache.h>    // Cache_WriteBack_All
 
 // Declared in Bus_RGB.cpp — set by the LCD VSYNC_END ISR every ~30.8 ms.
 extern volatile bool lgfx_vsync_flag;
@@ -81,6 +82,12 @@ static void lv_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *c
     tft.pushPixels((uint16_t *)color_p, w * h, true);
     tft.endWrite();
     tft.waitDMA();
+    // The LCD DMA reads the PSRAM framebuffer directly, bypassing the CPU data
+    // cache. LovyanGFX's per-area write-back did not reliably reach PSRAM on
+    // this board: stale cache lines showed as short horizontal streaks on keys
+    // and fields that had just been redrawn (confirmed on the real LCD).
+    // Writing back all dirty lines after each flush removes them.
+    Cache_WriteBack_All();
 
     bool lastArea = lv_disp_flush_is_last(drv);
     if (lastArea) refreshActive = false;

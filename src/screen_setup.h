@@ -94,7 +94,13 @@ static void _locKey(char c) {
             buf[len] = '.'; buf[len + 1] = '\0';
         }
     } else if (c >= '0' && c <= '9') {
-        if (len < 10) { buf[len] = c; buf[len + 1] = '\0'; }
+        // Integer part: at most 2 digits for latitude, 3 for longitude.
+        const char* dot = strchr(buf, '.');
+        int intDigits = 0;
+        for (const char* q = buf; *q && q != dot; ++q) if (*q >= '0' && *q <= '9') ++intDigits;
+        int maxInt = (_loc_field == 0) ? 2 : 3;
+        bool ok = dot ? true : (intDigits < maxInt);
+        if (ok && len < 10) { buf[len] = c; buf[len + 1] = '\0'; }
     }
     _renderLocValue(_loc_field);
     ui_set_text(_loc_status, "");
@@ -275,6 +281,8 @@ static lv_obj_t* _sectionTitle(lv_obj_t* p, int x, int y, int w, const char* tex
     return lbl;
 }
 
+static const int FIELD_VALUE_X = 96;   // value column inside a field (after the tag)
+
 // Creates a labelled value field; clickable if cb != nullptr.
 // Sets *val_out to the right-aligned value label.
 static lv_obj_t* _field(lv_obj_t* p, int x, int y, int w,
@@ -308,7 +316,9 @@ static lv_obj_t* _field(lv_obj_t* p, int x, int y, int w,
     ui_set_text(vl, "--.-");
     lv_obj_set_style_text_font(vl, UI_F_BIG, 0);    // Plex Mono 26: coordinates / NORAD
     ui_set_text_color(vl, C_CYAN);
-    lv_obj_align(vl, LV_ALIGN_RIGHT_MID, 0, 0);
+    // Left-aligned at a fixed column: typing or deleting only changes the last
+    // character, so existing digits never shift (no smear on the slow panel).
+    lv_obj_align(vl, LV_ALIGN_LEFT_MID, FIELD_VALUE_X, 0);
     *val_out = vl;
     return box;
 }

@@ -20,6 +20,8 @@
 |------|--------|-----|
 | Flash layout | Builds for **8 MB** flash: two 3 MB OTA slots, 1.875 MB LittleFS at `0x610000` (`partitions.csv`, `platformio.ini`) | This v1.1 board reports 8 MB flash; the original 16 MB image aborts before `setup()` |
 | LCD colour fix | `lib/LovyanGFX/.../esp32s3/Bus_RGB.cpp`: `lcd_ck_out_edge` now follows `pclk_active_neg` (it read `pclk_idle_high`) | The wrong PCLK output edge corrupted fast pixel transitions: white/green text looked smeared and 1-px stripes showed wrong colours |
+| LCD streak fix | `src/lv_driver.h`: `Cache_WriteBack_All()` after every LVGL flush | Stale CPU cache lines never reached the PSRAM framebuffer and showed as short horizontal streaks on freshly redrawn keys and fields |
+| SETUP input | Numbers left-aligned at a fixed column with a `_` caret, cyan outline on the active field, lat ≤ 2 / lon ≤ 3 integer digits, instant key response | Right-aligned digits shifted on every key press and smeared on the slow panel |
 | UI v2 | New palette, Inter + IBM Plex Mono LVGL fonts, header with UTC/local time, NORAD, TLE-age chip and Wi-Fi status, redesigned navigation bar | Readability on the 7" panel |
 | Redraw load | Guarded LVGL setters (`ui_set_text`, `ui_set_hidden`, …) skip unchanged updates | SKY/PASS no longer redraw whole rows every second |
 | MAP page | Upcoming ground track is cached on a 30 s grid instead of 201 SGP4 calls per repaint | Worst UI stall on MAP reduced from ~850 ms to ~350 ms |
