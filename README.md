@@ -2,6 +2,37 @@
 
 > Touch-driven satellite tracking firmware for Waveshare ESP32-S3 integrated display boards.
 
+> [!IMPORTANT]
+> **This is a modified clone, not the original project.**
+> Original project and author: **HB9IIU** —
+> [github.com/HB9IIU/ESP32_S3_INTEGRATED_DISPLAY_SAT_TRACKER](https://github.com/HB9IIU/ESP32_S3_INTEGRATED_DISPLAY_SAT_TRACKER).
+> All credit for the tracker itself (SGP4 tracking, pass prediction, TLE handling, web installer,
+> HTTP API, OTA) goes to HB9IIU.
+> This copy was modified by **Henrydosg** to run on their own
+> **Waveshare ESP32-S3-Touch-LCD-7, board version 1.1**.
+>
+> *Bản sao này được chỉnh sửa từ dự án gốc của HB9IIU để chạy trên màn hình
+> Waveshare ESP32-S3-Touch-LCD-7 phiên bản 1.1.*
+
+## Changes in this clone (for Waveshare ESP32-S3-Touch-LCD-7 v1.1)
+
+| Area | Change | Why |
+|------|--------|-----|
+| Flash layout | Builds for **8 MB** flash: two 3 MB OTA slots, 1.875 MB LittleFS at `0x610000` (`partitions.csv`, `platformio.ini`) | This v1.1 board reports 8 MB flash; the original 16 MB image aborts before `setup()` |
+| LCD colour fix | `lib/LovyanGFX/.../esp32s3/Bus_RGB.cpp`: `lcd_ck_out_edge` now follows `pclk_active_neg` (it read `pclk_idle_high`) | The wrong PCLK output edge corrupted fast pixel transitions: white/green text looked smeared and 1-px stripes showed wrong colours |
+| UI v2 | New palette, Inter + IBM Plex Mono LVGL fonts, header with UTC/local time, NORAD, TLE-age chip and Wi-Fi status, redesigned navigation bar | Readability on the 7" panel |
+| Redraw load | Guarded LVGL setters (`ui_set_text`, `ui_set_hidden`, …) skip unchanged updates | SKY/PASS no longer redraw whole rows every second |
+| MAP page | Upcoming ground track is cached on a 30 s grid instead of 201 SGP4 calls per repaint | Worst UI stall on MAP reduced from ~850 ms to ~350 ms |
+| Boot / robustness | Boot diagnostics, LCD/I²C init error checks, TLE validation, Wi-Fi and web page updates | Easier diagnosis on this board |
+
+Display pins, RGB timing (14 MHz), CH422G and PSRAM settings are unchanged from the original.
+
+**Flashing this clone:** build and upload with PlatformIO (`pio run -e DISPLAY -t upload`, plus
+`uploadfs` for LittleFS on a fresh board). The web installer and OTA releases linked below belong to the
+original 16 MB project and do **not** match this 8 MB layout.
+
+---
+
 This project turns an 800×480 touchscreen into a self-contained satellite tracking console for amateur, weather, CubeSat, ISS, and geostationary satellites. It handles Wi-Fi onboarding, automatic geolocation, NTP time sync, TLE download and caching, SGP4 orbit propagation, pass prediction, an HTTP tracking API, live screenshots, browser flashing, and on-device firmware updates.
 
 ---
