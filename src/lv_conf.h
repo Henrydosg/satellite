@@ -163,7 +163,8 @@
 ===========================================================================*/
 #define LV_USE_THEME_DEFAULT 1
 #define LV_THEME_DEFAULT_DARK 1          /* 0=light  1=dark */
-#define LV_THEME_DEFAULT_GROW 1          /* buttons grow slightly on press */
+#define LV_THEME_DEFAULT_GROW 0          /* no grow animation on press (snappier, less redraw) */
+#define LV_THEME_DEFAULT_TRANSITION_TIME 0 /* instant press/release feedback, no delayed fade */
 
 #define LV_USE_THEME_BASIC   0
 #define LV_USE_THEME_MONO    0

@@ -28,22 +28,55 @@ static lv_obj_t* _sat_status = nullptr;
 static lv_obj_t* _lat_sel    = nullptr;
 static lv_obj_t* _lon_sel    = nullptr;
 
-// ── Field selection highlight ─────────────────────────────────────────────────
+// ── Field rendering ───────────────────────────────────────────────────────────
+// Active field: raised surface, cyan outline, cyan value with a "_" caret.
+// Inactive field: flat surface, white value, or a dim placeholder when empty.
+static const char* LOC_PLACEHOLDER   = "--.-";
+static const char* NORAD_PLACEHOLDER = "------";
+
+static void _renderLocValue(int field) {
+    const char* buf  = field == 0 ? _lat_buf : _lon_buf;
+    lv_obj_t*   disp = field == 0 ? _lat_val : _lon_val;
+    bool active = (_loc_field == field);
+    char txt[16];
+    if (active) {
+        snprintf(txt, sizeof(txt), "%s_", buf);
+        ui_set_text(disp, txt);
+        ui_set_text_color(disp, C_CYAN);
+    } else {
+        ui_set_text(disp, buf[0] ? buf : LOC_PLACEHOLDER);
+        ui_set_text_color(disp, buf[0] ? C_VAL : C_DIM);
+    }
+}
+
+static void _renderNoradValue() {
+    char txt[12];
+    if (_norad_buf[0]) {
+        snprintf(txt, sizeof(txt), "%s_", _norad_buf);
+        ui_set_text(_norad_val, txt);
+        ui_set_text_color(_norad_val, C_CYAN);
+    } else {
+        ui_set_text(_norad_val, NORAD_PLACEHOLDER);
+        ui_set_text_color(_norad_val, C_DIM);
+    }
+}
+
+static void _styleField(lv_obj_t* box, bool active) {
+    lv_obj_set_style_bg_color(box, lv_color_hex(active ? C_SURF2 : C_HDR), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(active ? C_CYAN : C_BORDER), 0);
+    lv_obj_set_style_border_width(box, active ? 2 : 1, 0);
+}
+
 static void _refreshSel() {
-    lv_obj_set_style_bg_color(_lat_sel,
-        lv_color_hex(_loc_field == 0 ? 0x1F3A5C : 0x1C2128), 0);
-    lv_obj_set_style_border_color(_lat_sel,
-        lv_color_hex(_loc_field == 0 ? 0x1F6FEB : C_DIV), 0);
-    lv_obj_set_style_bg_color(_lon_sel,
-        lv_color_hex(_loc_field == 1 ? 0x1F3A5C : 0x1C2128), 0);
-    lv_obj_set_style_border_color(_lon_sel,
-        lv_color_hex(_loc_field == 1 ? 0x1F6FEB : C_DIV), 0);
+    _styleField(_lat_sel, _loc_field == 0);
+    _styleField(_lon_sel, _loc_field == 1);
+    _renderLocValue(0);
+    _renderLocValue(1);
 }
 
 // ── Key logic ─────────────────────────────────────────────────────────────────
 static void _locKey(char c) {
-    char*     buf  = _loc_field == 0 ? _lat_buf : _lon_buf;
-    lv_obj_t* disp = _loc_field == 0 ? _lat_val : _lon_val;
+    char* buf = _loc_field == 0 ? _lat_buf : _lon_buf;
     int len = (int)strlen(buf);
     if (c == '\b') {
         if (len > 0) buf[len - 1] = '\0';
@@ -52,13 +85,18 @@ static void _locKey(char c) {
     } else if (c == '-') {
         if (!len) { buf[0] = '-'; buf[1] = '\0'; }
         else if (buf[0] == '-') memmove(buf, buf + 1, len);
-        else { memmove(buf + 1, buf, len + 1); buf[0] = '-'; }
+        else if (len < 10) { memmove(buf + 1, buf, len + 1); buf[0] = '-'; }
     } else if (c == '.') {
-        if (!strchr(buf, '.') && len < 10) { buf[len] = '.'; buf[len + 1] = '\0'; }
+        // Keep a leading zero: "." -> "0.", "-" -> "-0."
+        bool needZero = (len == 0) || (len == 1 && buf[0] == '-');
+        if (!strchr(buf, '.') && len + (needZero ? 2 : 1) <= 10) {
+            if (needZero) buf[len++] = '0';
+            buf[len] = '.'; buf[len + 1] = '\0';
+        }
     } else if (c >= '0' && c <= '9') {
         if (len < 10) { buf[len] = c; buf[len + 1] = '\0'; }
     }
-    ui_set_text(disp, buf[0] ? buf : "--.-");
+    _renderLocValue(_loc_field);
     ui_set_text(_loc_status, "");
 }
 
@@ -71,7 +109,7 @@ static void _noradKey(char c) {
     } else if (c >= '0' && c <= '9') {
         if (len < 7) { _norad_buf[len] = c; _norad_buf[len + 1] = '\0'; }
     }
-    ui_set_text(_norad_val, _norad_buf[0] ? _norad_buf : "------");
+    _renderNoradValue();
     ui_set_text(_sat_status, "");
 }
 
@@ -212,7 +250,11 @@ static lv_obj_t* _key(lv_obj_t* p, int x, int y, int w, int h,
     lv_obj_set_style_border_width(btn, 0, 0);
     lv_obj_set_style_radius(btn, 4, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void*)ud);
+    // No theme darkening filter on press: it re-renders the legend through a
+    // colour filter (looks smeared). The pressed background colour is enough.
+    lv_obj_set_style_color_filter_opa(btn, LV_OPA_TRANSP, LV_STATE_PRESSED);
+    // Act on touch-down so typing feels immediate (keys never scroll).
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_PRESSED, (void*)ud);
     lv_obj_t* l = lv_label_create(btn);
     ui_set_text(l, lbl);
     lv_obj_set_style_text_font(l, UI_F_HEAD, 0);   // large keypad legends
@@ -294,10 +336,6 @@ inline void build(lv_obj_t* panel) {
     _lat_sel = _field(panel, 12, 32, 374, "LAT", _field_cb, 0, &_lat_val);
     _lon_sel = _field(panel, 12, 82, 374, "LON", _field_cb, 1, &_lon_val);
 
-    if (loc.valid) {
-        ui_set_text(_lat_val, _lat_buf);
-        ui_set_text(_lon_val, _lon_buf);
-    }
     _refreshSel();
 
     // Location numpad: 4 cols × 4 rows
@@ -357,7 +395,7 @@ inline void build(lv_obj_t* panel) {
 
     // NORAD ID field aligned with LON field
     _field(panel, RX + 12, 82, 374, "NORAD ID", nullptr, 0, &_norad_val);
-    ui_set_text(_norad_val, "------");
+    _renderNoradValue();
 
     // NORAD numpad: 3 cols × 4 rows, centered in 398 px
     const int NKX0 = RX + 65, NKY0 = 136;
