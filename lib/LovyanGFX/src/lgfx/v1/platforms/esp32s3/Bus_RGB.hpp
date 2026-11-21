@@ -132,12 +132,12 @@ namespace lgfx
     dma_descriptor_t _dmadesc_restart;
     dma_descriptor_t* _dmadesc = nullptr;
     esp_lcd_i80_bus_handle_t _i80_bus = nullptr;
-    int32_t _dma_ch;
+    int32_t _dma_ch = -1;
 
     esp_lcd_panel_handle_t _panel_handle = nullptr;
 
     uint8_t *_frame_buffer = nullptr;
-    intr_handle_t _intr_handle;
+    intr_handle_t _intr_handle = nullptr;
     static void lcd_default_isr_handler(void *args);
   };
 

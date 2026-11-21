@@ -119,7 +119,10 @@
      lv_label_set_text(lbl, LV_SYMBOL_OK " Saved!");
    Full list: search LV_SYMBOL_ in lvgl/src/font/lv_symbol_def.h       */
 
-#define LV_FONT_DEFAULT &lv_font_montserrat_14   /* used when no font is specified */
+/* UI v2.0: Inter Medium 14 (4 bpp subset in src/fonts) is the default font.
+   LV_SYMBOL_* icons fall back to Montserrat 16 through the font's fallback. */
+#define LV_FONT_CUSTOM_DECLARE LV_FONT_DECLARE(ui_inter_500_14)
+#define LV_FONT_DEFAULT &ui_inter_500_14   /* used when no font is specified */
 
 /*===========================================================================
   WIDGETS (all enabled by default in LVGL 8)

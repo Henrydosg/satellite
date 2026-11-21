@@ -226,21 +226,6 @@ static const char *_wifi_status_text(wl_status_t status) {
     }
 }
 
-static bool _wifi_try_connect(uint32_t timeout_ms = 10000) {
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    WiFi.begin(_wifi_ssid_buf, _wifi_pass_buf);
-
-    uint32_t start = millis();
-    while (millis() - start < timeout_ms) {
-        wl_status_t status = WiFi.status();
-        if (status == WL_CONNECTED) return true;
-        delay(100);
-    }
-
-    return WiFi.status() == WL_CONNECTED;
-}
-
 // ─── Scan overlay ─────────────────────────────────────────────────────────────
 static lv_obj_t *_wifi_create_scan_overlay() {
     lv_obj_t *overlay = lv_obj_create(lv_scr_act());
@@ -476,7 +461,42 @@ static void _wifi_eye_cb(lv_event_t *) {
                       _wifi_pass_visible ? LV_SYMBOL_EYE_CLOSE : LV_SYMBOL_EYE_OPEN);
 }
 
+static bool _wifi_connect_pending = false;
+static uint32_t _wifi_connect_started = 0;
+static char _wifi_connect_ssid[WIFI_SSID_MAX + 1];
+static char _wifi_connect_pass[WIFI_PASS_MAX + 1];
+
+static void _wifi_connect_poll(lv_timer_t* timer) {
+    if (!_wifi_panel) {
+        _wifi_connect_pending = false;
+        lv_timer_del(timer);
+        return;
+    }
+    wl_status_t status = WiFi.status();
+    bool ok = status == WL_CONNECTED;
+    if (!ok && millis() - _wifi_connect_started < 10000) return;
+    _wifi_connect_pending = false;
+    lv_timer_del(timer);
+    if (!ok) {
+        WiFi.disconnect();
+        _wifi_show_toast(_wifi_status_text(status), 0x2A1A1A, 0xCC6644, 1600);
+        return;
+    }
+    NVSConfig::saveWiFi(_wifi_connect_ssid, _wifi_connect_pass);
+    if (_wifi_reboot_on_save) {
+        _wifi_show_toast("Saved - rebooting...", 0x143020, 0x33CC66, 0);
+        lv_timer_t* reboot = lv_timer_create([](lv_timer_t*) { ESP.restart(); }, 2000, nullptr);
+        if (reboot) lv_timer_set_repeat_count(reboot, 1);
+        return;
+    }
+    _wifi_show_toast("Connected & Saved", 0x143020, 0x33CC66, 1500);
+    _wifi_cancel_success_close_timer();
+    _wifi_success_close_timer = lv_timer_create(_wifi_success_close_timer_cb, 2000, nullptr);
+    if (_wifi_success_close_timer) lv_timer_set_repeat_count(_wifi_success_close_timer, 1);
+}
+
 static void _wifi_save_cb(lv_event_t *) {
+    if (_wifi_connect_pending) return;
     if (!_wifi_has_real_networks()) {
         _wifi_show_toast("No WiFi network found", 0x2A1A1A, 0xCC6644);
         return;
@@ -493,27 +513,17 @@ static void _wifi_save_cb(lv_event_t *) {
     }
 
     _wifi_show_toast("Connecting...", 0x0D1E35, WIFI_ACCENT_HEX, 0);
-    bool ok = _wifi_try_connect();
-    wl_status_t status = WiFi.status();
-
-    if (!ok) {
-        WiFi.disconnect();
-        _wifi_show_toast(_wifi_status_text(status), 0x2A1A1A, 0xCC6644, 1600);
-        return;
+    snprintf(_wifi_connect_ssid, sizeof(_wifi_connect_ssid), "%s", _wifi_ssid_buf);
+    snprintf(_wifi_connect_pass, sizeof(_wifi_connect_pass), "%s", _wifi_pass_buf);
+    _wifi_connect_started = millis();
+    _wifi_connect_pending = true;
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    WiFi.begin(_wifi_connect_ssid, _wifi_connect_pass);
+    if (!lv_timer_create(_wifi_connect_poll, 100, nullptr)) {
+        _wifi_connect_pending = false;
+        _wifi_show_toast("Connection timer unavailable", 0x2A1A1A, 0xCC6644);
     }
-
-    _wifi_nvs_save();
-    if (_wifi_reboot_on_save) {
-        _wifi_show_toast("Saved - rebooting...", 0x143020, 0x33CC66, 0);
-        lv_timer_handler();
-        delay(2000);
-        ESP.restart();
-        return;
-    }
-    _wifi_show_toast("Connected & Saved", 0x143020, 0x33CC66, 1500);
-    _wifi_cancel_success_close_timer();
-    _wifi_success_close_timer = lv_timer_create(_wifi_success_close_timer_cb, 2000, nullptr);
-    lv_timer_set_repeat_count(_wifi_success_close_timer, 1);
 }
 
 static void _wifi_kb_event_cb(lv_event_t *e) {

@@ -9,7 +9,6 @@
 #include "sat_tracker.h"
 #include "nvs_config.h"
 
-LV_FONT_DECLARE(JetBrainsMono_Regular_18);
 
 namespace ScreenMap {
 
@@ -156,22 +155,59 @@ static void _applyOverlay(double lat_sat_deg, double lon_sat_deg, double alt_km)
 }
 
 // ── Upcoming ground track ─────────────────────────────────────────────────────
-static void _drawGroundTrack() {
+// Track points sit on a fixed 30 s UTC grid and are cached between repaints.
+// Each repaint only propagates the grid points that newly entered the 100 min
+// window (normally 0–1 SGP4 calls instead of 201). The cache is rebuilt when
+// the tracked satellite or its TLE epoch changes, or when time jumps.
+static const int GT_STEP  = 30;                    // s between track points
+static const int GT_DUR   = 6000;                  // s of upcoming track
+static const int GT_N     = GT_DUR / GT_STEP;      // cached grid points
+static double   _gtLat[GT_N], _gtLon[GT_N];
+static time_t   _gtBase  = 0;                      // UTC time of grid point 0
+static bool     _gtValid = false;
+static uint32_t _gtNorad = 0;
+static time_t   _gtEpoch = 0;
+
+static void _gtFill(int from, int to) {
+    for (int i = from; i < to; i++) {
+        SatTracker::LatLon ll = SatTracker::latLonAt(_gtBase + (time_t)i * GT_STEP);
+        _gtLat[i] = ll.lat; _gtLon[i] = ll.lon;
+    }
+}
+
+static void _updateGroundTrackCache(time_t now, uint32_t norad) {
+    time_t base = (now / GT_STEP + 1) * GT_STEP;   // first grid point after now
+    bool rebuild = !_gtValid || norad != _gtNorad || SatTracker::_tleEpoch != _gtEpoch
+                || base < _gtBase || base - _gtBase >= (time_t)GT_N * GT_STEP;
+    if (rebuild) {
+        _gtBase = base;
+        _gtFill(0, GT_N);
+        _gtValid = true; _gtNorad = norad; _gtEpoch = SatTracker::_tleEpoch;
+        return;
+    }
+    int shift = (int)((base - _gtBase) / GT_STEP);
+    if (shift == 0) return;
+    memmove(_gtLat, _gtLat + shift, (GT_N - shift) * sizeof(double));
+    memmove(_gtLon, _gtLon + shift, (GT_N - shift) * sizeof(double));
+    _gtBase = base;
+    _gtFill(GT_N - shift, GT_N);
+}
+
+static void _drawGroundTrack(const SatTracker::State& s) {
+    _updateGroundTrackCache(time(nullptr), s.noradId);
+
     lv_draw_line_dsc_t ld; lv_draw_line_dsc_init(&ld);
     ld.color = lv_color_hex(C_DIM); ld.width = 1;
 
-    const int STEP = 30, DURATION = 6000;
-    time_t now = time(nullptr);
-    int prevX = -1, prevY = -1; double prevLon = 0; bool first = true;
-
-    for (int dt = 0; dt <= DURATION; dt += STEP) {
-        SatTracker::LatLon ll = SatTracker::latLonAt(now + dt);
-        int x = _lonToX(ll.lon), y = _latToY(ll.lat);
-        if (!first && fabs(ll.lon - prevLon) < 180.0) {
+    // Start at the live satellite position, then follow the cached grid.
+    int prevX = _lonToX(s.lon), prevY = _latToY(s.lat); double prevLon = s.lon;
+    for (int i = 0; i < GT_N; i++) {
+        int x = _lonToX(_gtLon[i]), y = _latToY(_gtLat[i]);
+        if (fabs(_gtLon[i] - prevLon) < 180.0) {
             lv_point_t seg[2] = {{(lv_coord_t)prevX,(lv_coord_t)prevY},{(lv_coord_t)x,(lv_coord_t)y}};
             lv_canvas_draw_line(_canvas, seg, 2, &ld);
         }
-        prevX = x; prevY = y; prevLon = ll.lon; first = false;
+        prevX = x; prevY = y; prevLon = _gtLon[i];
     }
 }
 
@@ -202,7 +238,7 @@ static void _drawFootprintOutline(double lat_deg, double lon_deg, double alt_km)
 // ── Toggle callback ───────────────────────────────────────────────────────────
 static void _toggle_cb(lv_event_t*) {
     _allSatsMode = !_allSatsMode;
-    lv_label_set_text(_toggle_lbl, _allSatsMode ? "THIS SAT" : "ALL SATS");
+    ui_set_text(_toggle_lbl, _allSatsMode ? "THIS SAT" : "ALL SATS");
     _tick = 4;   // force immediate repaint
 }
 
@@ -266,11 +302,28 @@ static void _drawAllSats() {
 
 // ── JPEG load (once at build time) ───────────────────────────────────────────
 static bool _loadMap() {
-    if (!LittleFS.exists("/worldmap.jpg")) {
-        Serial.println("[map] /worldmap.jpg not found"); return false;
+    File image = LittleFS.open("/worldmap.jpg", "r");
+    if (!image) {
+        BootDiagnostics::log("[map] /worldmap.jpg not found"); return false;
     }
+    const size_t jpegSize = image.size();
+    uint8_t* jpeg = jpegSize ? (uint8_t*)ps_malloc(jpegSize) : nullptr;
+    if (!jpeg) {
+        image.close();
+        BootDiagnostics::log("[map] Cannot allocate JPEG input (%u bytes)", (unsigned)jpegSize);
+        return false;
+    }
+    const size_t received = image.read(jpeg, jpegSize);
+    image.close();
+    if (received != jpegSize) {
+        free(jpeg);
+        BootDiagnostics::log("[map] Incomplete JPEG read: %u/%u bytes", (unsigned)received, (unsigned)jpegSize);
+        return false;
+    }
+    // The observed crash was inside drawJpgFile -> lfs_file_read. Decode from
+    // owned PSRAM bytes, with no filesystem handle held by the JPEG decoder.
     _map_orig = (lv_color_t*)ps_malloc((size_t)CW * CH * sizeof(lv_color_t));
-    if (!_map_orig) { Serial.println("[map] ps_malloc failed"); return false; }
+    if (!_map_orig) { free(jpeg); Serial.println("[map] ps_malloc failed"); return false; }
 
     LGFX_Sprite sprite(&tft);
     sprite.setColorDepth(16);
@@ -278,9 +331,11 @@ static bool _loadMap() {
     sprite.createSprite(MAP_W, MAP_H);
     if (!sprite.getBuffer()) {
         Serial.println("[map] sprite alloc failed");
-        free(_map_orig); _map_orig = nullptr; return false;
+        free(jpeg); free(_map_orig); _map_orig = nullptr; return false;
     }
-    if (!sprite.drawJpgFile(LittleFS, "/worldmap.jpg", 0, 0, MAP_W, MAP_H)) {
+    bool decoded = sprite.drawJpg(jpeg, jpegSize, 0, 0, MAP_W, MAP_H);
+    free(jpeg);
+    if (!decoded) {
         Serial.println("[map] JPEG decode failed");
         sprite.deleteSprite(); free(_map_orig); _map_orig = nullptr; return false;
     }
@@ -289,7 +344,7 @@ static bool _loadMap() {
     uint16_t* dp = (uint16_t*)_map_orig;
     for (size_t i = 0; i < (size_t)CW * CH; i++) dp[i] = __builtin_bswap16(sp[i]);
     sprite.deleteSprite();
-    Serial.println("[map] JPEG loaded OK");
+    BootDiagnostics::log("[map] JPEG loaded OK from %u PSRAM bytes; file closed before decode", (unsigned)jpegSize);
     return true;
 }
 
@@ -322,9 +377,9 @@ inline void build(lv_obj_t* panel) {
     lv_obj_add_event_cb(btn, _toggle_cb, LV_EVENT_CLICKED, nullptr);
 
     _toggle_lbl = lv_label_create(btn);
-    lv_label_set_text(_toggle_lbl, "ALL SATS");
-    lv_obj_set_style_text_font(_toggle_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(_toggle_lbl, lv_color_hex(C_CYAN), 0);
+    ui_set_text(_toggle_lbl, "ALL SATS");
+    lv_obj_set_style_text_font(_toggle_lbl, UI_F_LABEL, 0);
+    ui_set_text_color(_toggle_lbl, C_CYAN);
     lv_obj_center(_toggle_lbl);
 
     // Info strip — semi-transparent bar at the bottom, floats above canvas
@@ -338,9 +393,9 @@ inline void build(lv_obj_t* panel) {
     lv_obj_clear_flag(strip, LV_OBJ_FLAG_SCROLLABLE);
 
     _lbl_info = lv_label_create(strip);
-    lv_label_set_text(_lbl_info, "");
-    lv_obj_set_style_text_font(_lbl_info, &JetBrainsMono_Regular_18, 0);
-    lv_obj_set_style_text_color(_lbl_info, lv_color_hex(C_VAL), 0);
+    ui_set_text(_lbl_info, "");
+    lv_obj_set_style_text_font(_lbl_info, UI_F_VAL, 0);
+    ui_set_text_color(_lbl_info, C_VAL);
     lv_obj_set_width(_lbl_info, CW);
     lv_obj_set_style_text_align(_lbl_info, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(_lbl_info, LV_ALIGN_CENTER, 0, 0);
@@ -356,17 +411,18 @@ inline void update() {
     // Info strip — updated every second regardless of canvas throttle
     if (_lbl_info) {
         const SatTracker::State& s = SatTracker::getState();
-        if (!_allSatsMode && s.tleLoaded) {
+        if (!_allSatsMode && s.telemetryValid) {
             char loc[8]; _maidenhead(s.lat, s.lon, loc);
             char buf[80];
-            snprintf(buf, sizeof(buf),
-                     "AZ %5.1f\xc2\xb0  %-3s     EL %+5.1f\xc2\xb0     LOC  %s",
-                     s.azimuth, _compass(s.azimuth), s.elevation, loc);
-            lv_label_set_text(_lbl_info, buf);
-            lv_obj_set_style_text_color(_lbl_info,
-                lv_color_hex(s.elevation > 0 ? C_GREEN : C_VAL), 0);
+            if (s.observerValid)
+                snprintf(buf, sizeof(buf),
+                         "AZ %5.1f\xc2\xb0  %-3s     EL %+5.1f\xc2\xb0     LOC  %s",
+                         s.azimuth, _compass(s.azimuth), s.elevation, loc);
+            else snprintf(buf, sizeof(buf), "LOC %s     SET OBSERVER IN SETUP", loc);
+            ui_set_text(_lbl_info, buf);
+            ui_set_text_color(_lbl_info, s.elevation > 0 ? C_GREEN : C_VAL);
         } else {
-            lv_label_set_text(_lbl_info, "");
+            ui_set_text(_lbl_info, _allSatsMode ? "" : SatTracker::dataStatus());
         }
     }
 
@@ -382,7 +438,7 @@ inline void update() {
     const SatTracker::State& s = SatTracker::getState();
 
     // 1. Per-pixel pass: terminator + footprint shading → writes _map_orig to _cbuf
-    double alt = (s.tleLoaded && s.alt > 0) ? s.alt : 0.0;
+    double alt = (s.telemetryValid && s.alt > 0) ? s.alt : 0.0;
     _applyOverlay(s.lat, s.lon, alt);
 
     // 2. QTH crosshair (gold)
@@ -393,9 +449,9 @@ inline void update() {
         _dot(qx, qy, lv_color_hex(C_GOLD), 3);
     }
 
-    if (s.tleLoaded) {
+    if (s.telemetryValid) {
         // 3. Ground track (dim gray, drawn under footprint outline and dot)
-        _drawGroundTrack();
+        _drawGroundTrack(s);
 
         // 4. Footprint gold outline on top of the shaded interior
         if (s.alt > 0) _drawFootprintOutline(s.lat, s.lon, s.alt);

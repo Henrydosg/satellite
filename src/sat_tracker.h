@@ -60,6 +60,11 @@ struct State {
     char     name[32] = {};
     uint32_t noradId  = 0;
     bool     tleLoaded = false;
+    bool     timeValid = false;
+    bool     observerValid = false;
+    bool     telemetryValid = false;
+    bool     passSearchComplete = false;
+    bool     passSearchFailed = false;
     double   lat = 0, lon = 0, alt = 0;  // degrees, degrees, km
     double   azimuth   = 0;              // degrees 0-360
     double   elevation = 0;              // degrees
@@ -94,8 +99,7 @@ static bool     _issLoaded = false;
 static long     _revnumAtEpoch = 0;
 static double   _prevRange     = 0.0;
 static time_t   _prevRangeTime = 0;
-static float    _tleAgeAtLoad   = 0.0f;
-static time_t   _tleAgeLoadedAt = 0;
+static time_t   _tleEpoch = 0;
 
 static SkyEntry     skyEntries[MAX_SKY];
 static volatile int skyCount = 0;
@@ -115,6 +119,13 @@ static time_t jdToUnix(double jd) {
 }
 
 static bool _passComputeNeeded = false;
+static time_t _lastPassSearchAt = 0;
+static uint32_t _passRequestedAt = 0;
+
+static bool observerReady() {
+    NVSConfig::LocationData loc = NVSConfig::loadLocation();
+    return TLEValidation::observerValid(loc.valid, loc.lat, loc.lon);
+}
 
 static bool _initIssPredictor() {
     if (_issLoaded) {
@@ -153,6 +164,7 @@ static bool _issVisibleSample(time_t t, double& el, double& az) {
 static void computeIssSightings() {
     issSightingCount = 0;
     memset(issSightings, 0, sizeof(issSightings));
+    if (!TLEValidation::timeReady(time(nullptr)) || !observerReady()) return;
     if (!_initIssPredictor()) return;
 
     uint32_t t0 = millis();
@@ -227,6 +239,10 @@ static void computeIssSightings() {
 }
 
 static void computeAllPasses() {
+    if (!TLEValidation::timeReady(time(nullptr)) || !observerReady()) {
+        _allPassEntryCount = 0;
+        return;
+    }
     struct Candidate {
         PassInfo pass;
         uint32_t noradId;
@@ -346,7 +362,10 @@ static void computeAllPasses() {
 static void computeNextPasses() {
     passCount = 0;
     memset(passes, 0, sizeof(passes));
-    if (!state.tleLoaded) return;
+    state.pass = PassInfo{};
+    state.passSearchComplete = false;
+    state.passSearchFailed = false;
+    if (!state.tleLoaded || !state.timeValid || !state.observerValid) return;
 
     uint32_t t0 = millis();
     passinfo pd;  // not "pi" — sgp4unit.h defines pi as 3.14159...
@@ -365,7 +384,13 @@ static void computeNextPasses() {
             if (sgp4.satEl <= 0.0) { searchFrom = t; break; }
         }
     }
-    sgp4.initpredpoint((unsigned long)searchFrom, 0.0);
+    _lastPassSearchAt = now;
+    if (!sgp4.initpredpoint((unsigned long)searchFrom, 0.0)) {
+        state.passSearchComplete = true;
+        state.passSearchFailed = true;
+        BootDiagnostics::log("[prediction] NORAD %lu: initpredpoint failed", (unsigned long)state.noradId);
+        return;
+    }
 
     for (int i = 0; i < MAX_PASSES; i++) {
         if (!sgp4.nextpass(&pd, 20)) break;
@@ -382,17 +407,28 @@ static void computeNextPasses() {
         sgp4.setpredpoint(pd.jdstop + 5.0 / 1440.0);  // advance 5 min past end
     }
     state.pass = passCount > 0 ? passes[0] : PassInfo{};
-    Serial.printf("[tracker] %d passes computed in %lu ms\n", passCount, millis() - t0);
+    state.passSearchComplete = true;
+    BootDiagnostics::log("[prediction] NORAD %lu: %d passes, %lu ms",
+                         (unsigned long)state.noradId, passCount, (unsigned long)(millis() - t0));
 }
 
 inline bool begin(uint32_t noradId) {
     memset(&state, 0, sizeof(state));
     state.noradId = noradId;
+    snprintf(state.name, sizeof(state.name), "NORAD %lu", (unsigned long)noradId);
+    passCount = 0;
+    memset(passes, 0, sizeof(passes));
+    _passComputeNeeded = false;
+    _lastPassSearchAt = 0;
+    _prevRangeTime = 0;
+    state.timeValid = TLEValidation::timeReady(time(nullptr));
+    NVSConfig::LocationData loc = NVSConfig::loadLocation();
+    state.observerValid = TLEValidation::observerValid(loc.valid, loc.lat, loc.lon);
 
     char name[30], l1[70], l2[70];
     if (!TLEManager::loadTLE(noradId, name, l1, l2)) {
-        Serial.printf("[tracker] TLE not found for NORAD %lu\n", (unsigned long)noradId);
-        snprintf(state.name, sizeof(state.name), "NORAD %lu", (unsigned long)noradId);
+        BootDiagnostics::log("[tracker] NORAD %lu: %s", (unsigned long)noradId,
+                             TLEManager::filesystemReady() ? "NO VALID TLE DATA" : "LITTLEFS UNAVAILABLE");
         return false;
     }
 
@@ -405,41 +441,61 @@ inline bool begin(uint32_t noradId) {
     _revnumAtEpoch = atol(revbuf);
 
     if (!sgp4.init(name, l1, l2)) {
-        Serial.printf("[tracker] SGP4 init failed for %s\n", name);
+        BootDiagnostics::log("[tracker] SGP4 init failed for %s, error=%d", name, sgp4.satrec.error);
         return false;
     }
     state.tleLoaded   = true;
     time_t tleEpoch   = TLEManager::epochFromLine1(l1);
     time_t nowEpoch   = time(nullptr);
-    _tleAgeAtLoad     = tleEpoch > 0 && nowEpoch > tleEpoch
-                      ? (float)(nowEpoch - tleEpoch) / 3600.0f : 0.0f;
-    _tleAgeLoadedAt   = time(nullptr);
-    state.tleAgeHours = _tleAgeAtLoad;
+    _tleEpoch = tleEpoch;
+    state.tleAgeHours = state.timeValid && nowEpoch > tleEpoch
+                       ? (float)(nowEpoch - tleEpoch) / 3600.0f : 0.0f;
 
-    NVSConfig::LocationData loc = NVSConfig::loadLocation();
-    if (loc.valid)
+    if (state.observerValid)
         sgp4.site(loc.lat, loc.lon, 0.0);
 
     // Quick position fix to detect GEO before deciding on pass compute
-    time_t now_t = time(nullptr);
-    sgp4.findsat((unsigned long)now_t);
-    state.alt         = sgp4.satAlt;
-    state.isGeo       = (state.alt > 35000.0);
     state.inclination = sgp4.satrec.inclo * 180.0 / M_PI;
+    if (state.timeValid) {
+        sgp4.findsat((unsigned long)time(nullptr));
+        state.isGeo = isfinite(sgp4.satAlt) && sgp4.satAlt > 35000.0;
+    }
 
     Serial.printf("[tracker] Ready: %s  (NORAD %lu)%s\n",
                   state.name, (unsigned long)noradId,
                   state.isGeo ? "  [GEO]" : "");
 
-    if (!state.isGeo) computeNextPasses();
+    BootDiagnostics::log("[tracker] TLE valid, NORAD=%lu epoch=%lld UTC=%lld observer=%s",
+                         (unsigned long)noradId, (long long)tleEpoch, (long long)time(nullptr),
+                         state.observerValid ? "stored (verify in SETUP)" : "NOT SET");
+    _passComputeNeeded = !state.isGeo && state.timeValid && state.observerValid;
+    _passRequestedAt = millis();
     return true;
 }
 
 inline void update() {
+    state.timeValid = TLEValidation::timeReady(time(nullptr));
+    state.telemetryValid = false;
     if (!state.tleLoaded) return;
+    if (!state.timeValid) {
+        state.pass = PassInfo{};
+        return;
+    }
 
     time_t now_t = time(nullptr);
     sgp4.findsat((unsigned long)now_t);
+    if (sgp4.satrec.error != 0 || !isfinite(sgp4.satLat) || !isfinite(sgp4.satLon) ||
+        !isfinite(sgp4.satAlt) || !isfinite(sgp4.vo[0]) || !isfinite(sgp4.vo[1]) || !isfinite(sgp4.vo[2])) {
+        static uint32_t lastErrorLog = 0;
+        if (millis() - lastErrorLog >= 10000 || lastErrorLog == 0) {
+            BootDiagnostics::log("[tracker] Propagation failed: NORAD=%lu SGP4 error=%d",
+                                 (unsigned long)state.noradId, sgp4.satrec.error);
+            lastErrorLog = millis();
+        }
+        state.pass = PassInfo{};
+        return;
+    }
+    state.telemetryValid = true;
     state.lat       = sgp4.satLat;
     state.lon       = sgp4.satLon;
     state.alt       = sgp4.satAlt;
@@ -449,7 +505,7 @@ inline void update() {
     state.satVis     = sgp4.satVis;
     state.velocity    = sqrt(sgp4.vo[0]*sgp4.vo[0] + sgp4.vo[1]*sgp4.vo[1] + sgp4.vo[2]*sgp4.vo[2]);
     state.orbitNumber = (uint32_t)(_revnumAtEpoch + 1 + (long)((sgp4.satJd - sgp4.satrec.jdsatepoch) * sgp4.revpday));
-    state.tleAgeHours = _tleAgeAtLoad + (float)(now_t - _tleAgeLoadedAt) / 3600.0f;
+    state.tleAgeHours = now_t > _tleEpoch ? (float)(now_t - _tleEpoch) / 3600.0f : 0.0f;
 
     // Range rate by 1-second differentiation → Doppler and signal delay
     if (_prevRangeTime > 0 && now_t > _prevRangeTime) {
@@ -463,8 +519,9 @@ inline void update() {
     state.isGeo = (state.alt > 35000.0);
 
     // Request recompute when the soonest pass has ended — runs in loop(), not here
-    if (!state.isGeo &&
-        (passCount == 0 || (passes[0].valid && time(nullptr) > passes[0].stop + 15)))
+    if (!state.isGeo && state.observerValid &&
+        ((passCount == 0 && (_lastPassSearchAt == 0 || now_t - _lastPassSearchAt >= 60)) ||
+         (passCount > 0 && passes[0].valid && now_t > passes[0].stop + 15)))
         _passComputeNeeded = true;
     state.pass = passCount > 0 ? passes[0] : PassInfo{};
 }
@@ -472,18 +529,35 @@ inline void update() {
 // Call from loop() — runs the heavy SGP4 pass search outside the LVGL timer.
 inline void runPassCompute() {
     if (!_passComputeNeeded) return;
+    if (!state.timeValid || !state.observerValid || !state.tleLoaded || !state.telemetryValid) return;
+    if (millis() - _passRequestedAt < 100) return; // Let the first LVGL frame appear.
     _passComputeNeeded = false;
     computeNextPasses();
 }
 
 inline const State& getState() { return state; }
 
+inline const char* dataStatus() {
+    if (!TLEManager::filesystemReady()) return "NO FILESYSTEM";
+    if (!state.tleLoaded) return "NO TLE DATA";
+    if (!state.timeValid) return "WAITING FOR TIME";
+    if (!state.telemetryValid) return "SGP4 ERROR";
+    return "TRACKING";
+}
+inline const char* passStatus() {
+    if (!state.tleLoaded || !state.timeValid || !state.telemetryValid) return dataStatus();
+    if (!state.observerValid) return "SET OBSERVER";
+    if (state.passSearchFailed) return "PASS SEARCH FAILED";
+    if (_passComputeNeeded) return "PREDICTING...";
+    return state.passSearchComplete ? "NO PASS FOUND" : "WAITING FOR PASS";
+}
+
 struct ElAz { double el; double az; };
 
 // Returns predicted elevation + azimuth at an arbitrary unix time.
 // Temporarily modifies the sgp4 object; SatTracker::update() restores state next tick.
 inline ElAz elevAzAt(time_t t) {
-    if (!state.tleLoaded) return {-90.0, 0.0};
+    if (!state.tleLoaded || !state.timeValid || !state.observerValid) return {-90.0, 0.0};
     sgp4.findsat((unsigned long)t);
     return {sgp4.satEl, sgp4.satAz};
 }
@@ -500,7 +574,7 @@ struct LatLon { double lat; double lon; };
 
 // Returns predicted sub-satellite point at an arbitrary unix time.
 inline LatLon latLonAt(time_t t) {
-    if (!state.tleLoaded) return {0.0, 0.0};
+    if (!state.tleLoaded || !state.timeValid || !state.telemetryValid) return {0.0, 0.0};
     sgp4.findsat((unsigned long)t);
     return {sgp4.satLat, sgp4.satLon};
 }
@@ -583,8 +657,12 @@ static void _skyTaskFn(void*) {
         int      mapCnt = 0;
         time_t   now    = time(nullptr);
 
-        if (!loc.valid)
-            Serial.println("[sky] WARNING: location not set — elevations will be wrong");
+        if (!TLEValidation::timeReady(now)) {
+            skyCount = mapEntryCount = 0;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        bool siteValid = TLEValidation::observerValid(loc.valid, loc.lat, loc.lon);
 
         uint32_t tleRevision = TLEManager::tleRevision();
         uint32_t listRevision = NVSConfig::mySatsRevision();
@@ -614,8 +692,9 @@ static void _skyTaskFn(void*) {
                 uint32_t id = cached.id;
                 if (NVSConfig::isSatHidden(id)) continue;
                 if (!_skySgp4.init(cached.name, cached.l1, cached.l2)) continue;
-                if (loc.valid) _skySgp4.site(loc.lat, loc.lon, 0.0);
+                if (siteValid) _skySgp4.site(loc.lat, loc.lon, 0.0);
                 _skySgp4.findsat((unsigned long)now);
+                if (_skySgp4.satrec.error != 0 || !isfinite(_skySgp4.satLat) || !isfinite(_skySgp4.satLon)) continue;
 
                 // All satellites → map entries (no elevation filter)
                 if (mapCnt < SAT_COUNT) {
@@ -628,7 +707,7 @@ static void _skyTaskFn(void*) {
                 }
 
                 // Above-horizon satellites → sky entries
-                if (_skySgp4.satEl <= 0.0 || cnt >= MAX_SKY) continue;
+                if (!siteValid || _skySgp4.satEl <= 0.0 || cnt >= MAX_SKY) continue;
                 SkyEntry& e = work[cnt];
                 strncpy(e.name, cached.name, sizeof(e.name) - 1);
                 e.name[sizeof(e.name) - 1] = '\0';

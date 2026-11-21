@@ -182,7 +182,9 @@ namespace lgfx
     bus_config.bus_width = 16;
     bus_config.max_transfer_bytes = 4092;
 
-    if (ESP_OK != esp_lcd_new_i80_bus(&bus_config, &_i80_bus)) {
+    esp_err_t init_result = esp_lcd_new_i80_bus(&bus_config, &_i80_bus);
+    if (init_result != ESP_OK) {
+      ESP_LOGE("Bus_RGB", "LCD bus initialization failed: %s", esp_err_to_name(init_result));
       return false;
     }
     uint8_t pixel_bytes = (_cfg.panel->getWriteDepth() & bit_mask) >> 3;
@@ -211,6 +213,7 @@ namespace lgfx
     if (_dma_ch < 0)
     {
       esp_lcd_del_i80_bus(_i80_bus);
+      _i80_bus = nullptr;
       ESP_LOGE("Bus_RGB", "DMA channel not found...");
       return false;
     }
@@ -233,12 +236,31 @@ namespace lgfx
 
 
     size_t fb_len = (_cfg.panel->width() * pixel_bytes) * _cfg.panel->height();
+    if (fb_len == 0) {
+      ESP_LOGE("Bus_RGB", "Invalid framebuffer size");
+      release();
+      return false;
+    }
     auto data = (uint8_t*)heap_alloc_psram(fb_len);
     _frame_buffer = data;
+    if (!data) {
+      ESP_LOGE("Bus_RGB", "PSRAM framebuffer allocation failed: %u bytes, largest block %u",
+               (unsigned)fb_len, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+      release();
+      return false;
+    }
+    memset(data, 0, fb_len);
     static constexpr size_t MAX_DMA_LEN = (4096-64);
     size_t dmadesc_size = (fb_len - 1) / MAX_DMA_LEN + 1;
     auto dmadesc = (dma_descriptor_t*)heap_caps_malloc(sizeof(dma_descriptor_t) * dmadesc_size, MALLOC_CAP_DMA);
     _dmadesc = dmadesc;
+    if (!dmadesc) {
+      ESP_LOGE("Bus_RGB", "DMA descriptor allocation failed: %u bytes, largest block %u",
+               (unsigned)(sizeof(dma_descriptor_t) * dmadesc_size),
+               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+      release();
+      return false;
+    }
 
     size_t len = fb_len;
     while (len > MAX_DMA_LEN)
@@ -253,8 +275,7 @@ namespace lgfx
     *(uint32_t*)dmadesc = ((len + 3) & ( ~3 )) | len << 12 | 0xC0000000;
     dmadesc->buffer = (uint8_t *)data;
     dmadesc->next = _dmadesc;
-    GDMA.channel[_dma_ch].out.link.addr = (uintptr_t)&(_dmadesc);
-    GDMA.channel[_dma_ch].out.link.start = 1;
+    // Start DMA only after the descriptors and interrupt handler are ready.
     //////////////////////////////////////////////
 
     memcpy(&_dmadesc_restart, _dmadesc, sizeof(_dmadesc_restart));
@@ -281,7 +302,10 @@ namespace lgfx
     lcd_clock.lcd_clkcnt_n = std::max<uint32_t>(1u, clkcnt - 1);
     lcd_clock.lcd_clk_equ_sysclk = (clkcnt == 1);
     lcd_clock.lcd_ck_idle_edge = false;
-    lcd_clock.lcd_ck_out_edge = _cfg.pclk_idle_high;
+    // Output data edge comes from pclk_active_neg (it was wrongly taken from
+    // pclk_idle_high, which left edge=0 and corrupted fast pixel transitions on
+    // the Waveshare 7" panel). pclk_idle_high is not applied: idle edge stays low.
+    lcd_clock.lcd_ck_out_edge = _cfg.pclk_active_neg;
     lcd_clock.lcd_clkm_div_num = div_n;
     lcd_clock.lcd_clkm_div_b = div_b;
     lcd_clock.lcd_clkm_div_a = div_a;
@@ -351,11 +375,23 @@ namespace lgfx
   auto sigs = LGFX_LCD_I80_SIG(_cfg.port);
 #endif
 
-    esp_intr_alloc_intrstatus(sigs->irq_id, isr_flags,
+    init_result = esp_intr_alloc_intrstatus(sigs->irq_id, isr_flags,
                                    (uint32_t)&dev->lc_dma_int_st,
                                     LCD_LL_EVENT_VSYNC_END, lcd_default_isr_handler, this, &_intr_handle);
-    esp_intr_enable(_intr_handle);
+    if (init_result != ESP_OK) {
+      ESP_LOGE("Bus_RGB", "VSYNC interrupt allocation failed: %s", esp_err_to_name(init_result));
+      release();
+      return false;
+    }
+    init_result = esp_intr_enable(_intr_handle);
+    if (init_result != ESP_OK) {
+      ESP_LOGE("Bus_RGB", "VSYNC interrupt enable failed: %s", esp_err_to_name(init_result));
+      release();
+      return false;
+    }
 
+    GDMA.channel[_dma_ch].out.link.addr = (uintptr_t)_dmadesc;
+    GDMA.channel[_dma_ch].out.link.start = 1;
     dev->lcd_user.lcd_update = 1;
     dev->lcd_user.lcd_start = 1;
 
@@ -370,17 +406,36 @@ namespace lgfx
 
   void Bus_RGB::release(void)
   {
+    if (_i80_bus) {
+      auto dev = getDev(_cfg.port);
+      dev->lc_dma_int_ena.val = 0;
+      dev->lcd_user.lcd_start = 0;
+      if (_dma_ch >= 0) {
+        GDMA.channel[_dma_ch].out.link.stop = 1;
+        GDMA.channel[_dma_ch].out.conf0.out_rst = 1;
+        GDMA.channel[_dma_ch].out.conf0.out_rst = 0;
+      }
+    }
     if (_intr_handle) {
+      esp_intr_disable(_intr_handle);
       esp_intr_free(_intr_handle);
+      _intr_handle = nullptr;
     }
     if (_i80_bus)
     {
       esp_lcd_del_i80_bus(_i80_bus);
+      _i80_bus = nullptr;
     }
+    _dma_ch = -1;
     if (_dmadesc)
     {
       heap_caps_free(_dmadesc);
       _dmadesc = nullptr;
+    }
+    if (_frame_buffer)
+    {
+      heap_caps_free(_frame_buffer);
+      _frame_buffer = nullptr;
     }
   }
 

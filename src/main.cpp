@@ -22,7 +22,7 @@ static void serveTracking() {
     const auto& state = SatTracker::getState();
     httpServer.sendHeader("Cache-Control", "no-store");
 
-    if (!state.tleLoaded || state.name[0] == '\0' ||
+    if (!state.tleLoaded || !state.telemetryValid || !state.observerValid || state.name[0] == '\0' ||
         !isfinite(state.azimuth) || !isfinite(state.elevation)) {
         httpServer.send(503, "application/json", "{\"error\":\"Tracking data unavailable\"}");
         return;
@@ -47,11 +47,11 @@ static void show_splash() {
         f = root.openNextFile();
     }
     if (!LittleFS.exists("/splash.jpg")) {
-        Serial.println("[splash] /splash.jpg not found.");
+        BootDiagnostics::log("[splash] /splash.jpg not found; continuing");
         return;
     }
     bool ok = tft.drawJpgFile(LittleFS, "/splash.jpg", 0, 0, 800, 480);
-    Serial.printf("[splash] drawJpgFile: %s\n", ok ? "OK" : "FAILED");
+    BootDiagnostics::log("[splash] JPEG framebuffer drawing: %s", ok ? "OK" : "FAILED");
     if (ok) {
         tft.setTextDatum(lgfx::datum_t::bottom_right);
         tft.setFont(&fonts::DejaVu18);
@@ -63,18 +63,28 @@ static void show_splash() {
 
 void setup() {
     uint32_t t_setup0 = millis();
-    Serial.begin(115200);
-    Serial.setTxTimeoutMs(0);
+    BootDiagnostics::begin();
     delay(500);
-    Serial.println("\n=== ESP32-S3 Satellite Tracker ===");
+    BootDiagnostics::log("=== ESP32-S3 Satellite Tracker v%s ===", FIRMWARE_VERSION);
+    BootDiagnostics::log("[boot] Diagnostics: UART0/CH343 + Serial; reset reason=%d, flash=%u bytes",
+                         (int)esp_reset_reason(), ESP.getFlashChipSize());
+    BootDiagnostics::memory("application startup");
+    if (!psramFound()) BootDiagnostics::halt("PSRAM detection");
 
-    initTFT();
+    if (!initTFT()) BootDiagnostics::halt("LCD initialization");
     runOrientationCheck();
+    BootDiagnostics::log("[screen] Orientation check complete");
 
-    if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
-        Serial.println("LittleFS mount failed.");
+    bool filesystemReady = LittleFS.begin(false, "/littlefs", 10, "littlefs");
+    TLEManager::setFilesystemReady(filesystemReady);
+    if (!filesystemReady) {
+        BootDiagnostics::log("[filesystem] LittleFS mount FAILED; continuing without assets");
     } else {
-        Serial.println("LittleFS mounted.");
+        BootDiagnostics::log("[filesystem] LittleFS mounted");
+        BootDiagnostics::log("[filesystem] total=%u used=%u splash=%s worldmap=%s",
+                             LittleFS.totalBytes(), LittleFS.usedBytes(),
+                             LittleFS.exists("/splash.jpg") ? "present" : "MISSING",
+                             LittleFS.exists("/worldmap.jpg") ? "present" : "MISSING");
         show_splash();
     }
 
@@ -89,9 +99,11 @@ void setup() {
     Serial.printf("[ota] ArduinoOTA ready  (%s.local:3232)\n", WIFI_HOSTNAME);
 
     uint32_t t_lv0 = millis();
+    BootDiagnostics::memory("before LVGL init");
+    BootDiagnostics::log("[lvgl] Initializing main interface");
     lv_init();
-    lvgl_setup();
-    Serial.println("LVGL ready.");
+    if (!lvgl_setup()) BootDiagnostics::halt("LVGL driver initialization");
+    BootDiagnostics::log("[lvgl] Main display/input drivers ready");
     Serial.printf("[perf] LVGL init + driver setup       %lu ms\n", millis() - t_lv0);
 
     if (screenshot.begin(800, 480, &httpServer)) {
@@ -108,22 +120,30 @@ void setup() {
     uint32_t t_sat0 = millis();
     SatTracker::begin(satId);
     Serial.printf("[perf] SatTracker::begin()            %lu ms\n", millis() - t_sat0);
-    SatTracker::startSkyTask();
     BootManager::drawStatus("Building interface...   Please wait...", 0x4A9ECC);
 
     uint32_t t_ui0 = millis();
+    BootDiagnostics::memory("before interface build");
     ScreenManager::build(lv_scr_act());
     Serial.printf("[perf] ScreenManager::build()         %lu ms\n", millis() - t_ui0);
+    // UI construction loads the map JPEG. Start background cache reads only
+    // after those asset file handles have been closed.
+    SatTracker::startSkyTask();
 
     Serial.printf("[perf] setup() total                  %lu ms\n", millis() - t_setup0);
-    Serial.println("UI ready. Entering loop.");
+    BootDiagnostics::log("[screen] UI built; entering LVGL loop");
 }
 
 void loop() {
     ArduinoOTA.handle();
+    uint32_t handlerStarted = micros();
     lv_timer_handler();
+    lvgl_record_handler(micros() - handlerStarted);
+    ScreenTracker::serviceTleRequest();
+    ScreenSetup::serviceTleRequest();
     SatTracker::runPassCompute();      // next-pass search for active sat
     httpServer.handleClient();
+    lvgl_diagnostics_poll();
 
     delay(5);
 }

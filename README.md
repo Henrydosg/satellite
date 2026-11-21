@@ -27,6 +27,16 @@ After the first install, future releases can also be installed directly on the d
 
 Both boards share the same ESP32-S3 SoC, 800×480 RGB parallel display, GT911 capacitive touch controller, 16 MB flash, and 8 MB OPI PSRAM.
 
+Local hardware exception: the connected board reports **8 MB flash** in
+`logs/device-monitor-261121-140702.log`. Its original 16 MB firmware aborts in
+ESP-IDF flash initialization before `setup()`. This checkout therefore builds
+`DISPLAY` for 8 MB flash with two 3 MB OTA slots and LittleFS at `0x610000`.
+NVS stays at `0x9000` with its original size. Flash mode, OPI PSRAM, RGB pins,
+timings, and CH422G output masks are unchanged. Use the matching locally built
+partition table and images; firmware-only OTA cannot migrate this partition
+layout, and upstream 16 MB release binaries do not match this target. No device
+upload or erase is performed by building the project.
+
 ---
 
 ## Screenshots

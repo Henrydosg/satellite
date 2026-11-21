@@ -6,7 +6,6 @@
 #include "sat_tracker.h"
 #include "nvs_config.h"
 
-LV_FONT_DECLARE(JetBrainsMono_Regular_18);
 
 namespace ScreenPolar {
 
@@ -47,13 +46,13 @@ static void _sat_cb(lv_event_t* e) {
 
 // ── Build ─────────────────────────────────────────────────────────────────────
 inline void build(lv_obj_t* panel) {
-    const lv_font_t* F14 = &lv_font_montserrat_14;
-    const lv_font_t* F16 = &lv_font_montserrat_16;
-    const lv_font_t* FT  = &JetBrainsMono_Regular_18;
+    const lv_font_t* F14 = UI_F_LABEL;
+    const lv_font_t* F16 = UI_F_NAV;
+    const lv_font_t* FT  = UI_F_VAL;
 
     // Header
     mk_panel(panel, 0, HDR_H - 1, CONTENT_W, 1, C_DIV);
-    _lbl_title   = mk_label(panel, F14, C_SEC, 16, 12, "ABOVE HORIZON");
+    _lbl_title   = mk_label(panel, UI_F_HEAD, C_SEC, 16, 9, "ABOVE HORIZON");
     _lbl_updated = mk_label(panel, F14, C_DIM, 650, 12, "");
 
     // Satellite rows
@@ -76,7 +75,7 @@ inline void build(lv_obj_t* panel) {
         // Azimuth — centre-right
         _lbl_az[i] = mk_label(_rows[i], FT, C_DIM, 500, (ROW_H - 18) / 2);
 
-        lv_obj_add_flag(_rows[i], LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_rows[i], true);
     }
 
     // Empty state
@@ -98,18 +97,18 @@ inline void update() {
 
     // Title + scan timestamp
     snprintf(buf, sizeof(buf), "ABOVE HORIZON  (%d)", count);
-    lv_label_set_text(_lbl_title, buf);
+    ui_set_text(_lbl_title, buf);
 
     struct tm ti{}; time_t now = time(nullptr);
     localtime_r(&now, &ti);
     strftime(buf, sizeof(buf), "scan %H:%M:%S", &ti);
-    lv_label_set_text(_lbl_updated, buf);
+    ui_set_text(_lbl_updated, buf);
 
     int shown = count < MAX_ROWS ? count : MAX_ROWS;
 
     for (int i = 0; i < MAX_ROWS; i++) {
         if (i >= shown) {
-            lv_obj_add_flag(_rows[i], LV_OBJ_FLAG_HIDDEN);
+            ui_set_hidden(_rows[i], true);
             continue;
         }
 
@@ -120,25 +119,25 @@ inline void update() {
         uint32_t rowBg = isTracked  ? 0x0E2440
                        : e.isGeo   ? 0x201808
                        :             C_BG;
-        lv_obj_set_style_bg_color(_rows[i], lv_color_hex(rowBg), 0);
+        ui_set_bg_color(_rows[i], rowBg);
 
         // Store noradId for click handler
         lv_obj_set_user_data(_rows[i], (void*)(uintptr_t)e.noradId);
 
         // Name — gold for GEO, cyan if tracked
-        lv_label_set_text(_lbl_name[i], e.name);
+        ui_set_text(_lbl_name[i], e.name);
         uint32_t nameCol = isTracked ? C_CYAN : (e.isGeo ? C_GOLD : C_VAL);
-        lv_obj_set_style_text_color(_lbl_name[i], lv_color_hex(nameCol), 0);
+        ui_set_text_color(_lbl_name[i], nameCol);
 
         // Elevation — GEO uses gold (fixed orbit); LEO colour by height
         snprintf(buf, sizeof(buf), "%+.1f\xc2\xb0", e.elevation);
-        lv_label_set_text(_lbl_el[i], buf);
+        ui_set_text(_lbl_el[i], buf);
         uint32_t elCol;
         if (e.isGeo)              elCol = C_GOLD;
         else if (e.elevation > 45.0) elCol = C_GREEN;
         else if (e.elevation > 20.0) elCol = C_VAL;
         else                         elCol = C_GOLD;
-        lv_obj_set_style_text_color(_lbl_el[i], lv_color_hex(elCol), 0);
+        ui_set_text_color(_lbl_el[i], elCol);
 
         // Fixed-width format keeps [GEO] badge column-aligned across all rows
         if (e.isGeo)
@@ -147,16 +146,15 @@ inline void update() {
         else
             snprintf(buf, sizeof(buf), "AZ  %3.0f\xc2\xb0  %-3s",
                      e.azimuth, _compass(e.azimuth));
-        lv_label_set_text(_lbl_az[i], buf);
-        lv_obj_set_style_text_color(_lbl_az[i],
-            lv_color_hex(e.isGeo ? C_GOLD : C_DIM), 0);
+        ui_set_text(_lbl_az[i], buf);
+        ui_set_text_color(_lbl_az[i], e.isGeo ? C_GOLD : C_DIM);
 
-        lv_obj_clear_flag(_rows[i], LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_rows[i], false);
     }
 
     // Empty state
     if (count == 0) {
-        lv_obj_clear_flag(_lbl_empty, LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_lbl_empty, false);
 
         // Show tracked sat's next pass as fallback
         const SatTracker::State& s = SatTracker::getState();
@@ -167,17 +165,17 @@ inline void update() {
                 if (h > 0)      snprintf(buf, sizeof(buf), "Next: %s in %dh %02dm", s.name, h, m);
                 else if (m > 0) snprintf(buf, sizeof(buf), "Next: %s in %dm %02ds", s.name, m, sc);
                 else            snprintf(buf, sizeof(buf), "Next: %s in %ds",       s.name, sc);
-                lv_label_set_text(_lbl_next, buf);
-                lv_obj_clear_flag(_lbl_next, LV_OBJ_FLAG_HIDDEN);
+                ui_set_text(_lbl_next, buf);
+                ui_set_hidden(_lbl_next, false);
             } else {
-                lv_obj_add_flag(_lbl_next, LV_OBJ_FLAG_HIDDEN);
+                ui_set_hidden(_lbl_next, true);
             }
         } else {
-            lv_obj_add_flag(_lbl_next, LV_OBJ_FLAG_HIDDEN);
+            ui_set_hidden(_lbl_next, true);
         }
     } else {
-        lv_obj_add_flag(_lbl_empty, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(_lbl_next,  LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_lbl_empty, true);
+        ui_set_hidden(_lbl_next, true);
     }
 }
 

@@ -7,7 +7,6 @@
 #include "myconfig.h"
 #include "tle_manager.h"
 
-LV_FONT_DECLARE(JetBrainsMono_Regular_18);
 
 namespace ScreenSelector {
 
@@ -60,7 +59,7 @@ static void _close_cb(lv_event_t*) {
 static void _goBack_cb(lv_event_t*) {
     lv_obj_add_flag(_satPanel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(_grpPanel, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(_titleLbl, "SATELLITE SELECTOR");
+    ui_set_text(_titleLbl, "SATELLITE SELECTOR");
     lv_obj_add_flag(_backBtn, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -97,8 +96,8 @@ static void _updateSatRow(int r, uint32_t activeSat) {
         uint32_t bg = (newState == RT_SAT_ACTIVE) ? 0x1F3A5C : (r % 2 == 0 ? C_BG : C_HDR);
         lv_obj_set_style_bg_color(_satRows[r], lv_color_hex(bg), 0);
         if (_rowState[r] < RT_SAT) {
-            lv_obj_set_style_text_color(_satLabels[r], lv_color_hex(C_VAL), 0);
-            lv_obj_set_style_text_font(_satLabels[r], &JetBrainsMono_Regular_18, 0);
+            ui_set_text_color(_satLabels[r], C_VAL);
+            lv_obj_set_style_text_font(_satLabels[r], UI_F_VAL, 0);
             lv_obj_add_flag(_satRows[r], LV_OBJ_FLAG_CLICKABLE);
         }
         _rowState[r] = newState;
@@ -133,7 +132,7 @@ static void _grpRow_cb(lv_event_t* e) {
     _selectedGroup = g;
     _topIndex      = 0;
     for (int r = 0; r < SAT_ROWS; r++) _rowState[r] = RT_NONE;
-    lv_label_set_text(_titleLbl, _groups[g].label);
+    ui_set_text(_titleLbl, _groups[g].label);
     lv_obj_clear_flag(_backBtn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(_grpPanel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(_satPanel, LV_OBJ_FLAG_HIDDEN);
@@ -231,14 +230,14 @@ static void _refreshGroupRows() {
         lv_obj_t* nameLbl = lv_obj_get_child(grpRow, 0);
         lv_obj_t* cntLbl  = lv_obj_get_child(grpRow, 1);
         if (_groups[g].count == 0) {
-            lv_label_set_text(cntLbl, "(empty)");
-            lv_obj_set_style_text_color(nameLbl, lv_color_hex(C_DIM), 0);
+            ui_set_text(cntLbl, "(empty)");
+            ui_set_text_color(nameLbl, C_DIM);
             lv_obj_clear_flag(grpRow, LV_OBJ_FLAG_CLICKABLE);
         } else {
             char buf[16];
             snprintf(buf, sizeof(buf), "%d  " LV_SYMBOL_RIGHT, _groups[g].count);
-            lv_label_set_text(cntLbl, buf);
-            lv_obj_set_style_text_color(nameLbl, lv_color_hex(C_VAL), 0);
+            ui_set_text(cntLbl, buf);
+            ui_set_text_color(nameLbl, C_VAL);
             lv_obj_add_flag(grpRow, LV_OBJ_FLAG_CLICKABLE);
         }
     }
@@ -257,7 +256,7 @@ inline void build(lv_obj_t* scr) {
     lv_obj_clear_flag(_overlay, LV_OBJ_FLAG_SCROLLABLE);
 
     // Title — centered between the back and close controls
-    _titleLbl = mk_label(_overlay, &lv_font_montserrat_18, C_SEC, 72, 13, "SATELLITE SELECTOR");
+    _titleLbl = mk_label(_overlay, UI_F_HEAD, C_SEC, 72, 13, "SATELLITE SELECTOR");
     lv_obj_set_width(_titleLbl, 600);
     lv_obj_set_style_text_align(_titleLbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(_titleLbl, LV_ALIGN_TOP_MID, 0, 13);
@@ -271,8 +270,8 @@ inline void build(lv_obj_t* scr) {
     lv_obj_set_style_radius(_backBtn, 4, 0);
     lv_obj_set_style_pad_all(_backBtn, 0, 0);
     lv_obj_t* blbl = lv_label_create(_backBtn);
-    lv_label_set_text(blbl, LV_SYMBOL_LEFT);
-    lv_obj_set_style_text_color(blbl, lv_color_hex(C_VAL), 0);
+    ui_set_text(blbl, LV_SYMBOL_LEFT);
+    ui_set_text_color(blbl, C_VAL);
     lv_obj_center(blbl);
     lv_obj_add_event_cb(_backBtn, _goBack_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_add_flag(_backBtn, LV_OBJ_FLAG_HIDDEN);
@@ -286,8 +285,8 @@ inline void build(lv_obj_t* scr) {
     lv_obj_set_style_radius(xbtn, 4, 0);
     lv_obj_set_style_pad_all(xbtn, 0, 0);
     lv_obj_t* xlbl = lv_label_create(xbtn);
-    lv_label_set_text(xlbl, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_color(xlbl, lv_color_hex(C_VAL), 0);
+    ui_set_text(xlbl, LV_SYMBOL_CLOSE);
+    ui_set_text_color(xlbl, C_VAL);
     lv_obj_center(xlbl);
     lv_obj_add_event_cb(xbtn, _close_cb, LV_EVENT_CLICKED, nullptr);
 
@@ -320,19 +319,19 @@ inline void build(lv_obj_t* scr) {
 
         // child 0: group name
         lv_obj_t* nameLbl = lv_label_create(row);
-        lv_label_set_text(nameLbl, SAT_GROUPS[g].label);
-        lv_obj_set_style_text_font(nameLbl, &lv_font_montserrat_18, 0);
-        lv_obj_set_style_text_color(nameLbl, lv_color_hex(C_VAL), 0);
+        ui_set_text(nameLbl, SAT_GROUPS[g].label);
+        lv_obj_set_style_text_font(nameLbl, UI_F_HEAD, 0);
+        ui_set_text_color(nameLbl, C_VAL);
         lv_obj_set_style_bg_opa(nameLbl, LV_OPA_TRANSP, 0);
         lv_obj_align(nameLbl, LV_ALIGN_LEFT_MID, 20, 0);
 
         // child 1: sat count + arrow (updated after _buildItems)
         lv_obj_t* cntLbl = lv_label_create(row);
-        lv_obj_set_style_text_font(cntLbl, &lv_font_montserrat_18, 0);
-        lv_obj_set_style_text_color(cntLbl, lv_color_hex(C_DIM), 0);
+        lv_obj_set_style_text_font(cntLbl, UI_F_HEAD, 0);
+        ui_set_text_color(cntLbl, C_DIM);
         lv_obj_set_style_bg_opa(cntLbl, LV_OPA_TRANSP, 0);
         lv_obj_align(cntLbl, LV_ALIGN_RIGHT_MID, -16, 0);
-        lv_label_set_text(cntLbl, "...");
+        ui_set_text(cntLbl, "...");
     }
 
     // ── Step 2: sat panel ─────────────────────────────────────────────────────
@@ -365,7 +364,7 @@ inline void build(lv_obj_t* scr) {
         lv_obj_add_event_cb(row, _sat_cb, LV_EVENT_CLICKED, (void*)(intptr_t)r);
 
         lv_obj_t* lbl = lv_label_create(row);
-        lv_label_set_text(lbl, "");
+        ui_set_text(lbl, "");
         lv_obj_set_style_bg_opa(lbl, LV_OPA_TRANSP, 0);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
 
@@ -383,9 +382,9 @@ inline void build(lv_obj_t* scr) {
         lv_obj_set_style_radius(btn, 4, 0);
         lv_obj_set_style_pad_all(btn, 0, 0);
         lv_obj_t* lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, sym);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(C_VAL), 0);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+        ui_set_text(lbl, sym);
+        ui_set_text_color(lbl, C_VAL);
+        lv_obj_set_style_text_font(lbl, UI_F_HEAD, 0);
         lv_obj_center(lbl);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
     };
@@ -409,7 +408,7 @@ inline void open() {
     // Always start at step 1
     lv_obj_add_flag(_satPanel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(_grpPanel, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(_titleLbl, "SATELLITE SELECTOR");
+    ui_set_text(_titleLbl, "SATELLITE SELECTOR");
     lv_obj_add_flag(_backBtn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_overlay);
     lv_obj_clear_flag(_overlay, LV_OBJ_FLAG_HIDDEN);

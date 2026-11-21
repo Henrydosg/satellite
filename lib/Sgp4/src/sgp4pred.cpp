@@ -26,23 +26,29 @@ Sgp4::Sgp4(){
    whichconst = wgs84;   //newest constants
    sunoffset = -0.10471975511966; //sun aboven -6°  => not dark enough
    offset = 0.0;
+   line1[0] = line2[0] = '\0';
+   site(0.0, 0.0, 0.0);
 }
 
 ///Init functions/////
 bool Sgp4::init(const char naam[24], char longstr1[130], char longstr2[130]){
 
-  if (strcmp(longstr1, line1) == 0) {
-	  return false;
+  if (strcmp(longstr1, line1) == 0 && strcmp(longstr2, line2) == 0 && satrec.error == 0) {
+	  return true; // Already initialized; callers may be updating the observer site.
   }
 
   strlcpy(satName, naam, sizeof(satName));
   strlcpy(line1, longstr1, sizeof(line1));
   strlcpy(line2, longstr2, sizeof(line2));
 
-  twoline2rv(longstr1, longstr2, opsmode, whichconst, satrec );
+  // twoline2rv edits its input columns. Keep caller/cache TLEs intact.
+  char parseLine1[130], parseLine2[130];
+  strlcpy(parseLine1, longstr1, sizeof(parseLine1));
+  strlcpy(parseLine2, longstr2, sizeof(parseLine2));
+  twoline2rv(parseLine1, parseLine2, opsmode, whichconst, satrec );
 
   revpday   =  1440.0 / (2.0 * pi) * satrec.no;
-  return true;
+  return satrec.error == 0 && isfinite(revpday) && revpday > 0.0;
 }
 
 

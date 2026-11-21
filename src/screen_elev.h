@@ -6,7 +6,6 @@
 #include "screens_common.h"
 #include "sat_tracker.h"
 
-LV_FONT_DECLARE(JetBrainsMono_Regular_18);
 
 namespace ScreenElev {
 
@@ -98,7 +97,7 @@ static void _dot(int x, int y, lv_color_t col, int r) {
 }
 
 static void _placeXLabel(lv_obj_t* lbl, time_t t, const char* text) {
-    lv_label_set_text(lbl, text);
+    ui_set_text(lbl, text);
     const int W = 100;
     int cx = _timeToPanelX(t);
     int x  = cx - W / 2;
@@ -198,10 +197,10 @@ static void _buildProfile(const SatTracker::PassInfo& pass) {
 
 // ── Build ─────────────────────────────────────────────────────────────────────
 inline void build(lv_obj_t* panel) {
-    const lv_font_t* F12 = &lv_font_montserrat_12;
-    const lv_font_t* F14 = &lv_font_montserrat_14;
-    const lv_font_t* F18 = &lv_font_montserrat_18;
-    const lv_font_t* FT  = &JetBrainsMono_Regular_18;
+    const lv_font_t* F12 = UI_F_LABEL;
+    const lv_font_t* F14 = UI_F_LABEL;
+    const lv_font_t* F18 = UI_F_HEAD;
+    const lv_font_t* FT  = UI_F_VAL;
 
     // ── Top info row ──────────────────────────────────────────────────────────
     _lbl_aos = mk_label(panel, FT,  C_VAL, CHX, 7);
@@ -258,7 +257,7 @@ inline void build(lv_obj_t* panel) {
     lv_obj_set_style_border_width(_cursor, 0, 0);
     lv_obj_set_style_pad_all(_cursor, 0, 0);
     lv_obj_clear_flag(_cursor, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(_cursor, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_cursor, true);
 
     // ── X-axis tick labels ─────────────────────────────────────────────────────
     _lbl_xaos = mk_label(panel, F12, C_DIM,   0, CHY + CH + 4);
@@ -278,7 +277,7 @@ inline void build(lv_obj_t* panel) {
     // ── GEO overlay (shown instead of chart for geostationary satellites) ─────
     _geo_panel = mk_panel(panel, 0, 0, CONTENT_W, CONTENT_H, C_BG);
 
-    lv_obj_t* geo_title = mk_label(_geo_panel, &lv_font_montserrat_20, C_GOLD,
+    lv_obj_t* geo_title = mk_label(_geo_panel, UI_F_HEAD, C_GOLD,
                                     0, 80, "GEOSTATIONARY SATELLITE");
     lv_obj_set_width(geo_title, CONTENT_W);
     lv_obj_set_style_text_align(geo_title, LV_TEXT_ALIGN_CENTER, 0);
@@ -302,7 +301,7 @@ inline void build(lv_obj_t* panel) {
     lv_obj_set_width(_geo_lbl_inc, CONTENT_W);
     lv_obj_set_style_text_align(_geo_lbl_inc, LV_TEXT_ALIGN_CENTER, 0);
 
-    lv_obj_add_flag(_geo_panel, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_geo_panel, true);
 }
 
 // ── Update (called every second) ─────────────────────────────────────────────
@@ -312,7 +311,7 @@ inline void update() {
     char buf[80]; struct tm ti{};
 
     if (s.isGeo) {
-        lv_obj_clear_flag(_geo_panel, LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_geo_panel, false);
 
         static const char* compass[] = {
             "N","NNE","NE","ENE","E","ESE","SE","SSE",
@@ -320,24 +319,24 @@ inline void update() {
         };
         const char* dir = compass[(int)((s.azimuth + 11.25) / 22.5) % 16];
         snprintf(buf, sizeof(buf), "Azimuth  %.1f\xc2\xb0  %s", s.azimuth, dir);
-        lv_label_set_text(_geo_lbl_az, buf);
+        ui_set_text(_geo_lbl_az, buf);
         snprintf(buf, sizeof(buf), "Elevation  %.1f\xc2\xb0", s.elevation);
-        lv_label_set_text(_geo_lbl_el, buf);
+        ui_set_text(_geo_lbl_el, buf);
         snprintf(buf, sizeof(buf), "Inclination  %.2f\xc2\xb0", s.inclination);
-        lv_label_set_text(_geo_lbl_inc, buf);
+        ui_set_text(_geo_lbl_inc, buf);
         return;
     }
 
-    lv_obj_add_flag(_geo_panel, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_geo_panel, true);
 
     if (!s.pass.valid) {
-        lv_label_set_text(_lbl_aos,    "AOS  --:--:--");
-        lv_label_set_text(_lbl_max,    "");
-        lv_label_set_text(_lbl_los,    "LOS  --:--:--");
-        lv_label_set_text(_lbl_status, "Computing passes...");
-        lv_obj_set_style_text_color(_lbl_status, lv_color_hex(C_DIM), 0);
-        lv_label_set_text(_lbl_azinfo, "");
-        lv_obj_add_flag(_cursor, LV_OBJ_FLAG_HIDDEN);
+        ui_set_text(_lbl_aos,    "AOS  --:--:--");
+        ui_set_text(_lbl_max,    "");
+        ui_set_text(_lbl_los,    "LOS  --:--:--");
+        ui_set_text(_lbl_status, "Computing passes...");
+        ui_set_text_color(_lbl_status, C_DIM);
+        ui_set_text(_lbl_azinfo, "");
+        ui_set_hidden(_cursor, true);
         return;
     }
 
@@ -347,14 +346,14 @@ inline void update() {
     // ── Top labels ────────────────────────────────────────────────────────────
     time_t t = s.pass.start; localtime_r(&t, &ti);
     strftime(buf, sizeof(buf), "AOS  %H:%M:%S", &ti);
-    lv_label_set_text(_lbl_aos, buf);
+    ui_set_text(_lbl_aos, buf);
 
     t = s.pass.stop; localtime_r(&t, &ti);
     strftime(buf, sizeof(buf), "LOS  %H:%M:%S", &ti);
-    lv_label_set_text(_lbl_los, buf);
+    ui_set_text(_lbl_los, buf);
 
     snprintf(buf, sizeof(buf), "MAX  %.1f°", s.pass.maxEl);
-    lv_label_set_text(_lbl_max, buf);
+    ui_set_text(_lbl_max, buf);
 
     // ── Cursor dot — sits on the elevation curve, blinks every second ─────────
     if (_t1 > _t0 && now >= _t0 && now <= _t1) {
@@ -362,10 +361,10 @@ inline void update() {
         int cy = CHY + _elToY(s.elevation) - 5;
         lv_obj_set_pos(_cursor, cx, cy);
         _blinkOn = !_blinkOn;
-        if (_blinkOn) lv_obj_clear_flag(_cursor, LV_OBJ_FLAG_HIDDEN);
+        if (_blinkOn) ui_set_hidden(_cursor, false);
         else          lv_obj_add_flag  (_cursor, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_add_flag(_cursor, LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_cursor, true);
         _blinkOn = true;
     }
 
@@ -379,17 +378,17 @@ inline void update() {
         if (h > 0)      snprintf(buf, sizeof(buf), "AOS in %dh %02dm %02ds", h, m, sc);
         else if (m > 0) snprintf(buf, sizeof(buf), "AOS in %dm %02ds", m, sc);
         else            snprintf(buf, sizeof(buf), "AOS in %ds", sc);
-        lv_label_set_text(_lbl_status, buf);
-        lv_obj_set_style_text_color(_lbl_status, lv_color_hex(C_GOLD), 0);
+        ui_set_text(_lbl_status, buf);
+        ui_set_text_color(_lbl_status, C_GOLD);
     } else if (inPass) {
         int secs = (int)(s.pass.stop - now);
         int m = secs/60, sc = secs%60;
         snprintf(buf, sizeof(buf), "IN PASS  \xe2\x80\x94  LOS in %dm %02ds", m, sc);
-        lv_label_set_text(_lbl_status, buf);
-        lv_obj_set_style_text_color(_lbl_status, lv_color_hex(C_GREEN), 0);
+        ui_set_text(_lbl_status, buf);
+        ui_set_text_color(_lbl_status, C_GREEN);
     } else {
-        lv_label_set_text(_lbl_status, "Pass complete");
-        lv_obj_set_style_text_color(_lbl_status, lv_color_hex(C_DIM), 0);
+        ui_set_text(_lbl_status, "Pass complete");
+        ui_set_text_color(_lbl_status, C_DIM);
     }
 
     // ── AZ info ───────────────────────────────────────────────────────────────
@@ -397,7 +396,7 @@ inline void update() {
              _compassDir(s.pass.azStart), s.pass.azStart,
              _compassDir(_azAtTCA),       _azAtTCA,
              _compassDir(s.pass.azStop),  s.pass.azStop);
-    lv_label_set_text(_lbl_azinfo, buf);
+    ui_set_text(_lbl_azinfo, buf);
 }
 
 } // namespace ScreenElev

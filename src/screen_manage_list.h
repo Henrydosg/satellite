@@ -120,13 +120,13 @@ static void _askDelete(lv_event_t* e) {
     lv_obj_set_style_pad_all(box, 0, 0);
     lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* title = mk_label(box, &lv_font_montserrat_20, C_RED, 20, 20, "REMOVE SATELLITE?");
+    lv_obj_t* title = mk_label(box, UI_F_HEAD, C_RED, 20, 20, "REMOVE SATELLITE?");
     lv_obj_set_width(title, 460);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
     char msg[100];
     snprintf(msg, sizeof(msg), "%s\nNORAD %lu", _pendingName, (unsigned long)_pendingId);
-    lv_obj_t* detail = mk_label(box, &lv_font_montserrat_16, C_VAL, 20, 66, msg);
+    lv_obj_t* detail = mk_label(box, UI_F_NAV, C_VAL, 20, 66, msg);
     lv_obj_set_width(detail, 460);
     lv_obj_set_style_text_align(detail, LV_TEXT_ALIGN_CENTER, 0);
 
@@ -135,7 +135,7 @@ static void _askDelete(lv_event_t* e) {
     lv_obj_set_pos(cancel, 55, 150);
     lv_obj_add_event_cb(cancel, _cancelDelete, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* cl = lv_label_create(cancel);
-    lv_label_set_text(cl, "CANCEL");
+    ui_set_text(cl, "CANCEL");
     lv_obj_center(cl);
 
     lv_obj_t* remove = lv_btn_create(box);
@@ -145,7 +145,7 @@ static void _askDelete(lv_event_t* e) {
     lv_obj_set_style_bg_color(remove, lv_color_hex(C_RED), LV_STATE_PRESSED);
     lv_obj_add_event_cb(remove, _confirmDelete, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* rl = lv_label_create(remove);
-    lv_label_set_text(rl, LV_SYMBOL_TRASH "  REMOVE");
+    ui_set_text(rl, LV_SYMBOL_TRASH "  REMOVE");
     lv_obj_center(rl);
 }
 
@@ -155,20 +155,20 @@ static void _buildRows() {
     char countText[32];
     snprintf(countText, sizeof(countText), "%u satellite%s",
              (unsigned)_idCount, _idCount == 1 ? "" : "s");
-    lv_label_set_text(_countLabel, countText);
+    ui_set_text(_countLabel, countText);
 
     size_t pageCount = _idCount ? (_idCount + PAGE_SIZE - 1) / PAGE_SIZE : 1;
     char pageText[32];
     snprintf(pageText, sizeof(pageText), "PAGE %u / %u",
              (unsigned)(_page + 1), (unsigned)pageCount);
-    lv_label_set_text(_pageLabel, pageText);
+    ui_set_text(_pageLabel, pageText);
     if (_page == 0) lv_obj_add_state(_prevBtn, LV_STATE_DISABLED);
     else            lv_obj_clear_state(_prevBtn, LV_STATE_DISABLED);
     if (_page + 1 >= pageCount) lv_obj_add_state(_nextBtn, LV_STATE_DISABLED);
     else                        lv_obj_clear_state(_nextBtn, LV_STATE_DISABLED);
 
     if (_idCount == 0) {
-        lv_obj_t* empty = mk_label(_list, &lv_font_montserrat_18, C_DIM, 0, 60,
+        lv_obj_t* empty = mk_label(_list, UI_F_HEAD, C_DIM, 0, 60,
                                    "No satellites are available.");
         lv_obj_set_width(empty, 720);
         lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
@@ -196,7 +196,7 @@ static void _buildRows() {
         if (!TLEManager::loadTLE(id, name, l1, l2))
             snprintf(name, sizeof(name), "NORAD %lu", (unsigned long)id);
 
-        lv_obj_t* nl = mk_label(row, &lv_font_montserrat_16, C_VAL, 16, 8, name);
+        lv_obj_t* nl = mk_label(row, UI_F_NAV, C_VAL, 16, 8, name);
         lv_obj_set_width(nl, 430);
         char meta[80];
         time_t epoch = TLEManager::epochFromLine1(l1);
@@ -205,7 +205,7 @@ static void _buildRows() {
         const char* group = builtInGroupForSat(id);
         snprintf(meta, sizeof(meta), "NORAD %lu   TLE %.1f h   %s",
                  (unsigned long)id, age, group ? group : "MY SATS");
-        mk_label(row, &lv_font_montserrat_12, C_DIM, 16, 30, meta);
+        mk_label(row, UI_F_LABEL, C_DIM, 16, 30, meta);
 
         lv_obj_t* trash = lv_btn_create(row);
         lv_obj_set_size(trash, 54, 40);
@@ -217,8 +217,8 @@ static void _buildRows() {
         lv_obj_set_style_pad_all(trash, 0, 0);
         lv_obj_add_event_cb(trash, _askDelete, LV_EVENT_CLICKED, (void*)(uintptr_t)id);
         lv_obj_t* icon = lv_label_create(trash);
-        lv_label_set_text(icon, LV_SYMBOL_TRASH);
-        lv_obj_set_style_text_color(icon, lv_color_hex(C_RED), 0);
+        ui_set_text(icon, LV_SYMBOL_TRASH);
+        ui_set_text_color(icon, C_RED);
         lv_obj_center(icon);
     }
 }
@@ -247,7 +247,7 @@ inline void build(lv_obj_t* scr) {
     lv_obj_set_style_pad_all(_overlay, 0, 0);
     lv_obj_clear_flag(_overlay, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* title = mk_label(_overlay, &lv_font_montserrat_20, C_SEC, 20, 13, "MANAGE SATELLITES");
+    lv_obj_t* title = mk_label(_overlay, UI_F_HEAD, C_SEC, 20, 13, "MANAGE SATELLITES");
     lv_obj_set_width(title, 760);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
@@ -260,12 +260,12 @@ inline void build(lv_obj_t* scr) {
     lv_obj_set_style_pad_all(close, 0, 0);
     lv_obj_add_event_cb(close, _close, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* xl = lv_label_create(close);
-    lv_label_set_text(xl, LV_SYMBOL_CLOSE);
+    ui_set_text(xl, LV_SYMBOL_CLOSE);
     lv_obj_center(xl);
 
     mk_panel(_overlay, 0, 50, CONTENT_W, 1, C_DIV);
-    _countLabel = mk_label(_overlay, &lv_font_montserrat_14, C_DIM, 40, 64, "");
-    _pageLabel = mk_label(_overlay, &lv_font_montserrat_14, C_DIM, 610, 64, "");
+    _countLabel = mk_label(_overlay, UI_F_LABEL, C_DIM, 40, 64, "");
+    _pageLabel = mk_label(_overlay, UI_F_LABEL, C_DIM, 610, 64, "");
     lv_obj_set_width(_pageLabel, 150);
     lv_obj_set_style_text_align(_pageLabel, LV_TEXT_ALIGN_RIGHT, 0);
 
@@ -281,7 +281,7 @@ inline void build(lv_obj_t* scr) {
     lv_obj_set_pos(_prevBtn, 210, 390);
     lv_obj_add_event_cb(_prevBtn, _previousPage, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* prevLabel = lv_label_create(_prevBtn);
-    lv_label_set_text(prevLabel, LV_SYMBOL_LEFT "  PREV");
+    ui_set_text(prevLabel, LV_SYMBOL_LEFT "  PREV");
     lv_obj_center(prevLabel);
 
     _nextBtn = lv_btn_create(_overlay);
@@ -289,7 +289,7 @@ inline void build(lv_obj_t* scr) {
     lv_obj_set_pos(_nextBtn, 430, 390);
     lv_obj_add_event_cb(_nextBtn, _nextPage, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* nextLabel = lv_label_create(_nextBtn);
-    lv_label_set_text(nextLabel, "NEXT  " LV_SYMBOL_RIGHT);
+    ui_set_text(nextLabel, "NEXT  " LV_SYMBOL_RIGHT);
     lv_obj_center(nextLabel);
     lv_obj_add_flag(_overlay, LV_OBJ_FLAG_HIDDEN);
 }

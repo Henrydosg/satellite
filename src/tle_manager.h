@@ -6,6 +6,8 @@
 #include "myconfig.h"
 #include "http_utils.h"
 #include "nvs_config.h"
+#include "tle_validation.h"
+#include "HB9IIUdisplayInit.h"
 
 #define TLE_DIR             "/tle"
 #define TLE_LAST_FETCH_PATH "/tle/.last_fetch"
@@ -16,6 +18,9 @@
 namespace TLEManager {
 
 static volatile uint32_t _tleRevision = 0;
+static bool _filesystemReady = false;
+inline void setFilesystemReady(bool ready) { _filesystemReady = ready; }
+inline bool filesystemReady() { return _filesystemReady; }
 
 inline uint32_t tleRevision() { return _tleRevision; }
 
@@ -54,6 +59,7 @@ static void groupAttemptPath(int groupIndex, char* buf, size_t len) {
 }
 
 static time_t readTimestamp(const char* path) {
+    if (!_filesystemReady) return 0;
     File f = LittleFS.open(path, "r");
     if (!f) return 0;
     time_t value = (time_t)f.parseInt();
@@ -62,6 +68,7 @@ static time_t readTimestamp(const char* path) {
 }
 
 static void writeTimestamp(const char* path) {
+    if (!_filesystemReady || !TLEValidation::timeReady(time(nullptr))) return;
     File f = LittleFS.open(path, "w");
     if (f) {
         f.print((long)time(nullptr));
@@ -119,11 +126,7 @@ inline void saveSatSuccess(uint32_t id) {
 
 // ── File I/O ──────────────────────────────────────────────────────────────────
 
-inline bool tleExists(uint32_t id) {
-    char path[32];
-    tlePath(id, path, sizeof(path));
-    return LittleFS.exists(path);
-}
+inline bool tleExists(uint32_t id);
 
 inline bool deleteTLE(uint32_t id) {
     char path[32];
@@ -136,60 +139,67 @@ inline bool deleteTLE(uint32_t id) {
 
 static bool storeTLE(uint32_t id, const String& name,
                      const String& line1, const String& line2) {
-    char path[32];
-    tlePath(id, path, sizeof(path));
-    File f = LittleFS.open(path, "w");
-    if (!f) {
-        Serial.printf("[tle] ERROR: cannot write %s\n", path);
+    if (!_filesystemReady || !TLEValidation::pairValid(id, line1.c_str(), line2.c_str())) {
+        BootDiagnostics::log("[tle] Reject NORAD %lu: %s", (unsigned long)id,
+                             _filesystemReady ? "invalid length, ID, checksum or epoch" : "LittleFS unavailable");
         return false;
     }
-    f.println(name);
-    f.println(line1);
-    f.println(line2);
+    char path[32];
+    tlePath(id, path, sizeof(path));
+    if (!LittleFS.exists(TLE_DIR) && !LittleFS.mkdir(TLE_DIR)) return false;
+    char tempPath[36];
+    snprintf(tempPath, sizeof(tempPath), "%s.tmp", path);
+    File f = LittleFS.open(tempPath, "w");
+    if (!f) {
+        BootDiagnostics::log("[tle] ERROR: cannot write %s; check mount/free space", tempPath);
+        return false;
+    }
+    // Install only a complete file; a failed download/write must retain cache.
+    String payload = name + "\n" + line1 + "\n" + line2 + "\n";
+    bool complete = f.print(payload) == payload.length();
     f.close();
+    if (!complete || !LittleFS.rename(tempPath, path)) {
+        BootDiagnostics::log("[tle] ERROR: incomplete write/rename for %s; cache retained", path);
+        LittleFS.remove(tempPath);
+        return false;
+    }
     _tleRevision++;
     return true;
 }
 
 inline bool loadTLE(uint32_t id, char* name, char* line1, char* line2,
                     size_t nameLen = 30, size_t lineLen = 70) {
+    if (!name || !line1 || !line2 || nameLen == 0 || lineLen < 70) return false;
+    name[0] = line1[0] = line2[0] = '\0';
+    if (!_filesystemReady) return false;
     char path[32];
     tlePath(id, path, sizeof(path));
     File f = LittleFS.open(path, "r");
     if (!f) return false;
-    strncpy(name,  f.readStringUntil('\n').c_str(), nameLen - 1);
-    strncpy(line1, f.readStringUntil('\n').c_str(), lineLen - 1);
-    strncpy(line2, f.readStringUntil('\n').c_str(), lineLen - 1);
+    String rawName = f.readStringUntil('\n');
+    String rawLine1 = f.readStringUntil('\n');
+    String rawLine2 = f.readStringUntil('\n');
     f.close();
-    // Strip trailing \r (Windows line endings)
-    for (char* p : {name, line1, line2}) {
-        size_t n = strlen(p);
-        if (n > 0 && p[n - 1] == '\r') p[n - 1] = '\0';
+    rawName.trim(); rawLine1.trim(); rawLine2.trim();
+    if (!TLEValidation::pairValid(id, rawLine1.c_str(), rawLine2.c_str())) {
+        BootDiagnostics::log("[tle] Invalid cached TLE: %s (length/ID/checksum/epoch)", path);
+        return false;
     }
-    return (strlen(line1) > 10 && strlen(line2) > 10);
+    snprintf(name, nameLen, "%s", rawName.c_str());
+    snprintf(line1, lineLen, "%s", rawLine1.c_str());
+    snprintf(line2, lineLen, "%s", rawLine2.c_str());
+    return true;
+}
+
+inline bool tleExists(uint32_t id) {
+    char name[30], line1[70], line2[70];
+    return loadTLE(id, name, line1, line2);
 }
 
 // ── TLE age from embedded epoch ───────────────────────────────────────────────
 
 inline time_t epochFromLine1(const char* line1) {
-    if (!line1 || strlen(line1) < 32 || line1[0] != '1' || line1[1] != ' ')
-        return 0;
-
-    char yearStr[3] = { line1[18], line1[19], '\0' };
-    char dayStr[13] = {};
-    strncpy(dayStr, line1 + 20, 12);
-
-    int yr2 = atoi(yearStr);
-    double epochDay = atof(dayStr);
-    if (epochDay < 1.0 || epochDay >= 367.0) return 0;
-    int fullYear = (yr2 >= 57) ? (1900 + yr2) : (2000 + yr2);
-
-    struct tm t{};
-    t.tm_year = fullYear - 1900;
-    t.tm_mon  = 0;
-    t.tm_mday = 1;
-    time_t yearStart = mktime(&t);
-    return yearStart + (time_t)((epochDay - 1.0) * 86400.0);
+    return TLEValidation::epochFromLine1(line1);
 }
 
 inline float getTLEAgeHours(uint32_t id) {
@@ -235,6 +245,7 @@ struct ParseResult {
     int valid;
     int matched;
     int stored;
+    int storageFailed;
 };
 
 static ParseResult parseAndStore(const String& body) {
@@ -258,12 +269,10 @@ static ParseResult parseAndStore(const String& body) {
         String l2 = body.substring(pos, eol);    l2.trim();
         pos = eol + 1;
 
-        if (l1.length() < 10 || !l1.startsWith("1 ")) continue;
-        if (l2.length() < 10 || !l2.startsWith("2 ")) continue;
-
-        result.valid++;
-
+        if (l1.length() != 69 || l2.length() != 69) continue;
         uint32_t noradId = (uint32_t)atol(l1.c_str() + 2);
+        if (!TLEValidation::pairValid(noradId, l1.c_str(), l2.c_str())) continue;
+        result.valid++;
         if (!inSatList(noradId)) continue;
 
         result.matched++;
@@ -276,14 +285,17 @@ static ParseResult parseAndStore(const String& body) {
             oldEpoch = epochFromLine1(oldL1);
         time_t newEpoch = epochFromLine1(l1.c_str());
 
-        if (newEpoch != 0 && (oldEpoch == 0 || newEpoch > oldEpoch) &&
-            storeTLE(noradId, name, l1, l2)) {
+        if (newEpoch != 0 && (oldEpoch == 0 || newEpoch > oldEpoch)) {
+            if (!storeTLE(noradId, name, l1, l2)) {
+                ++result.storageFailed;
+                continue; // Do not mark an unsuccessful cache update as checked.
+            }
             Serial.printf("[tle] Stored %lu  %s\n", (unsigned long)noradId, name.c_str());
             result.stored++;
         }
         // This records that CelesTrak was successfully checked for this NORAD
         // ID, even when the local element set was already current.
-        if (newEpoch != 0) {
+        if (newEpoch != 0 && tleExists(noradId)) {
             saveManualCheck(noradId);
             saveSatSuccess(noradId);
         }
@@ -305,8 +317,10 @@ static bool fetchPersonalSatellite(uint32_t id) {
     String name = body.substring(0, p1); name.trim();
     String l1 = body.substring(p1 + 1, p2); l1.trim();
     String l2 = p3 >= 0 ? body.substring(p2 + 1, p3) : body.substring(p2 + 1); l2.trim();
-    if (!l1.startsWith("1 ") || !l2.startsWith("2 ")) return false;
-    if ((uint32_t)atol(l1.c_str() + 2) != id) return false;
+    if (!TLEValidation::pairValid(id, l1.c_str(), l2.c_str())) {
+        BootDiagnostics::log("[tle] NORAD %lu response rejected: invalid TLE", (unsigned long)id);
+        return false;
+    }
 
     time_t newEpoch = epochFromLine1(l1.c_str());
     if (newEpoch == 0) return false;
@@ -331,10 +345,18 @@ static const char* tleGroupLabel(const char* group) {
 
 inline Result checkAndRefresh(StatusCb statusCb = nullptr) {
     Result r{};
+    if (!_filesystemReady || !TLEValidation::timeReady(time(nullptr))) {
+        BootDiagnostics::log("[tle] Refresh skipped: %s", !_filesystemReady
+                             ? "LittleFS unavailable; upload matching filesystem manually"
+                             : "waiting for valid UTC time");
+        r.skipped = true;
+        return r;
+    }
 
-    if (!LittleFS.exists(TLE_DIR)) {
-        LittleFS.mkdir(TLE_DIR);
-        Serial.println("[tle] Created /tle directory");
+    if (!LittleFS.exists(TLE_DIR) && !LittleFS.mkdir(TLE_DIR)) {
+        BootDiagnostics::log("[tle] ERROR: cannot create /tle; check filesystem/free space");
+        r.skipped = true;
+        return r;
     }
 
     // Count only active catalogue satellites. A deliberately removed built-in
@@ -350,6 +372,7 @@ inline Result checkAndRefresh(StatusCb statusCb = nullptr) {
 
     time_t now       = time(nullptr);
     bool anyDue = false;
+    bool serverUnavailable = false;
 
     // Fetch each group
     for (int g = 0; g < TLE_GROUP_COUNT; g++) {
@@ -384,16 +407,24 @@ inline Result checkAndRefresh(StatusCb statusCb = nullptr) {
         char url[200];
         snprintf(url, sizeof(url), "%s?%s&FORMAT=TLE", CELESTRAK_URL, TLE_GROUPS[g]);
 
-        String body = HttpUtils::get(url, true, 3);
+        int httpCode = -1;
+        String body = HttpUtils::get(url, true, 2, &httpCode);
         if (body.isEmpty()) {
-            Serial.printf("[tle] Group %s FAILED\n", TLE_GROUPS[g]);
+            BootDiagnostics::log("[tle] Group %s FAILED, HTTP=%d", TLE_GROUPS[g], httpCode);
             r.groupsFailed++;
+            if (httpCode <= 0 || httpCode == 403 || httpCode == 429) {
+                serverUnavailable = true;
+                BootDiagnostics::log("[tle] Stop this refresh: network failure or server rate limit");
+                break;
+            }
             continue;
         }
 
         ParseResult parsed = parseAndStore(body);
-        if (parsed.valid == 0) {
-            Serial.printf("[tle] Group %s returned no valid TLEs\n", TLE_GROUPS[g]);
+        r.satellitesStored += parsed.stored;
+        if (parsed.valid == 0 || parsed.storageFailed > 0) {
+            BootDiagnostics::log("[tle] Group %s incomplete: valid=%d storage failures=%d",
+                                 TLE_GROUPS[g], parsed.valid, parsed.storageFailed);
             r.groupsFailed++;
             continue;
         }
@@ -401,7 +432,18 @@ inline Result checkAndRefresh(StatusCb statusCb = nullptr) {
         Serial.printf("[tle] Group %s: %d matched, %d newer TLEs stored\n",
                       TLE_GROUPS[g], parsed.matched, parsed.stored);
         r.groupsFetched++;
-        r.satellitesStored += parsed.stored;
+    }
+
+    // A selected catalogue satellite may be absent from otherwise valid group
+    // responses. Request that ID once, subject to the existing retry cooldown.
+    uint32_t selectedId = NVSConfig::loadSelectedSat(DEFAULT_SAT_ID);
+    time_t lastSelectedAttempt = getLastManualCheck(selectedId);
+    if (!serverUnavailable && !tleExists(selectedId) &&
+        (lastSelectedAttempt == 0 || now - lastSelectedAttempt >= TLE_RETRY_AGE_H * 3600)) {
+        anyDue = true;
+        saveManualCheck(selectedId);
+        BootDiagnostics::log("[tle] Selected NORAD %lu missing; trying CATNR query", (unsigned long)selectedId);
+        if (fetchPersonalSatellite(selectedId)) r.satellitesStored++;
     }
 
     // Personal satellites are authoritative in NVS, so they survive both
@@ -410,6 +452,7 @@ inline Result checkAndRefresh(StatusCb statusCb = nullptr) {
     uint32_t personal[NVSConfig::MAX_MY_SATS] = {};
     size_t personalCount = NVSConfig::loadMySats(personal, NVSConfig::MAX_MY_SATS);
     for (size_t i = 0; i < personalCount; i++) {
+        if (serverUnavailable) break;
         uint32_t id = personal[i];
         if (inSatList(id)) continue;
         time_t checked = getLastSatSuccess(id);

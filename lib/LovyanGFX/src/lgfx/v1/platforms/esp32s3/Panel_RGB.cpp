@@ -27,6 +27,7 @@ Contributors:
 
 #include <soc/gpio_reg.h>
 #include <soc/gpio_periph.h>
+#include <esp_log.h>
 
 namespace lgfx
 {
@@ -54,6 +55,11 @@ namespace lgfx
     auto h = _cfg.panel_height;
 
     auto frame_buffer_ = _bus->getDMABuffer(0);
+    if (!frame_buffer_) {
+      ESP_LOGE("Panel_RGB", "RGB bus has no framebuffer");
+      _bus->release();
+      return false;
+    }
     size_t lineArray_size = h * sizeof(void*);
     uint8_t** lineArray = (uint8_t**)heap_alloc_dma(lineArray_size);
 
@@ -80,8 +86,11 @@ namespace lgfx
         return true;
       }
       heap_free(lineArray);
+      _lines_buffer = nullptr;
     }
 
+    ESP_LOGE("Panel_RGB", "Framebuffer line table allocation failed: %u bytes", (unsigned)lineArray_size);
+    _bus->release();
     return false;
   }
 /*

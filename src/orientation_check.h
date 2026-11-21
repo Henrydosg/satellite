@@ -46,6 +46,7 @@ static void runOrientationCheck() {
     int8_t saved = NVSConfig::loadRotation();
     if (saved >= 0) {
         tft.setRotation((uint8_t)saved);
+        BootDiagnostics::log("[screen] Applied saved rotation=%d", saved);
         return;
     }
 
@@ -63,6 +64,7 @@ static void runOrientationCheck() {
     // Thin separator in the middle (rotation 0 coords)
     tft.setRotation(0);
     tft.fillRect(0, 238, 800, 4, 0x1A1A2A);
+    BootDiagnostics::log("[screen] Orientation prompt drawn to framebuffer; selection timeout=60s");
 
     // Poll for touch in rotation-0 coordinate space.
     // ty < 240  → user read the top half   → rotation 0 is correct

@@ -377,6 +377,7 @@ static bool connectWiFi(const char* ssid, const char* pass,
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 inline void run() {
+    BootDiagnostics::log("[wifi] Boot manager starting; checking saved credentials");
     Serial.println("\n[boot] ╔══════════════════════════════╗");
     Serial.println(  "[boot] ║   Boot Manager starting      ║");
     Serial.println(  "[boot] ╚══════════════════════════════╝");
@@ -390,16 +391,20 @@ inline void run() {
 
     if (!creds.valid) {
         Serial.println("[boot] → No credentials — launching LVGL WiFi setup");
+        BootDiagnostics::memory("before WiFi onboarding LVGL init");
+        BootDiagnostics::log("[lvgl] Initializing WiFi onboarding");
         lv_init();
-        lvgl_setup();
+        if (!lvgl_setup()) BootDiagnostics::halt("WiFi onboarding LVGL drivers");
         _wifi_reboot_on_save = true;
         wifi_page_open();
-        while (true) { lv_timer_handler(); delay(5); }
+        BootDiagnostics::log("[wifi] Onboarding page built; servicing LVGL");
+        while (true) { lv_timer_handler(); lvgl_diagnostics_poll(); delay(5); }
     }
 
     Serial.printf("[boot] → SSID: %s\n", creds.ssid);
 
     // ── Step 2: connect WiFi (up to 3 attempts) ──────────────────────────────
+    BootDiagnostics::log("[wifi] Saved credentials found; starting station connection");
     bool wifiOk = false;
     for (int attempt = 1; attempt <= 3 && !wifiOk; attempt++) {
         Serial.printf("[boot] WiFi attempt %d/3\n", attempt);
@@ -412,33 +417,30 @@ inline void run() {
         }
     }
     if (!wifiOk) {
-        rebootIn("No WiFi");
+        BootDiagnostics::log("[wifi] Connection failed; continuing with cached TLEs/offline UI");
+        drawStatus("WiFi unavailable - using cached data", 0xFFAA00);
+    } else {
+        BootDiagnostics::log("[wifi] Connected, IP=%s RSSI=%d", WiFi.localIP().toString().c_str(), WiFi.RSSI());
     }
 
-    // ── Step 3: geolocation (first boot only) ─────────────────────────────────
+    // ── Step 3: use the saved observer; ask the user to set it if missing ──────
     NVSConfig::LocationData loc = NVSConfig::loadLocation();
     Serial.printf("[boot] Location in NVS  : %s\n",
                   loc.valid ? "FOUND" : "NOT FOUND");
 
     if (!loc.valid) {
-        Serial.println("[boot] → First boot: fetching geolocation");
-        if (fetchGeoLocation()) {
-            loc = NVSConfig::loadLocation();
-            Serial.printf("[boot] → Location cached: lat=%.4f  lon=%.4f  tz=%s\n",
-                          loc.lat, loc.lon, loc.timezone);
-        } else {
-            Serial.println("[boot] → Geolocation failed — will use UTC");
-        }
+        BootDiagnostics::log("[observer] NOT SET: enter and confirm latitude/longitude in SETUP");
+        drawStatus("Observer not set - enter location in SETUP", 0xFFAA00);
     } else {
-        Serial.printf("[boot] → Cached location: lat=%.4f  lon=%.4f  tz=%s\n",
-                      loc.lat, loc.lon, loc.timezone);
+        BootDiagnostics::log("[observer] Stored lat=%.4f lon=%.4f tz=%s; verify in SETUP",
+                             loc.lat, loc.lon, loc.timezone);
     }
 
     // ── Step 4: fetch current UTC offset (every boot) ─────────────────────────
     int32_t offset = 0;
     if (loc.valid) {
         NVSConfig::UtcOffsetCache cache = NVSConfig::loadUtcOffsetCache();
-        if (fetchUtcOffset(loc.lat, loc.lon, offset)) {
+        if (wifiOk && fetchUtcOffset(loc.lat, loc.lon, offset)) {
             NVSConfig::saveUtcOffsetCache(offset, time(nullptr));
         } else if (cache.valid) {
             offset = cache.offsetSec;
@@ -456,7 +458,9 @@ inline void run() {
 
     // ── Step 5: NTP sync ──────────────────────────────────────────────────────
     if (!syncTime(offset)) {
-        rebootIn("No NTP sync");
+        BootDiagnostics::log("[time] NTP not ready; UI will show WAITING FOR TIME while SNTP continues");
+    } else {
+        BootDiagnostics::log("[time] NTP synchronized: UTC epoch=%lld", (long long)time(nullptr));
     }
 
     // ── Step 6: TLE refresh ───────────────────────────────────────────────────
@@ -468,7 +472,11 @@ inline void run() {
 
     {
         char msg[128];
-        if (tleResult.satellitesMissing == 0) {
+        if (!TLEManager::filesystemReady()) {
+            drawStatus("NO FILESYSTEM - upload matching assets manually", 0xFFAA00);
+        } else if (!TLEValidation::timeReady(time(nullptr))) {
+            drawStatus("WAITING FOR TIME - TLE refresh deferred", 0xFFAA00);
+        } else if (tleResult.satellitesMissing == 0) {
             if (tleResult.skipped)
                 snprintf(msg, sizeof(msg),
                          "TLE cache fresh - all sources checked within 24 h (%d satellites)",

@@ -58,8 +58,8 @@ static void _locKey(char c) {
     } else if (c >= '0' && c <= '9') {
         if (len < 10) { buf[len] = c; buf[len + 1] = '\0'; }
     }
-    lv_label_set_text(disp, buf[0] ? buf : "--.-");
-    lv_label_set_text(_loc_status, "");
+    ui_set_text(disp, buf[0] ? buf : "--.-");
+    ui_set_text(_loc_status, "");
 }
 
 static void _noradKey(char c) {
@@ -71,8 +71,8 @@ static void _noradKey(char c) {
     } else if (c >= '0' && c <= '9') {
         if (len < 7) { _norad_buf[len] = c; _norad_buf[len + 1] = '\0'; }
     }
-    lv_label_set_text(_norad_val, _norad_buf[0] ? _norad_buf : "------");
-    lv_label_set_text(_sat_status, "");
+    ui_set_text(_norad_val, _norad_buf[0] ? _norad_buf : "------");
+    ui_set_text(_sat_status, "");
 }
 
 // ── Callbacks ─────────────────────────────────────────────────────────────────
@@ -87,57 +87,40 @@ inline void openFirmwareUpdate() { firmware_update_page_open(); }
 
 static void _save_cb(lv_event_t*) {
     if (!_lat_buf[0] || !_lon_buf[0]) {
-        lv_label_set_text(_loc_status, "Enter lat and lon first");
-        lv_obj_set_style_text_color(_loc_status, lv_color_hex(C_RED), 0);
+        ui_set_text(_loc_status, "Enter lat and lon first");
+        ui_set_text_color(_loc_status, C_RED);
         return;
     }
     float lat = atof(_lat_buf), lon = atof(_lon_buf);
     if (lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) {
-        lv_label_set_text(_loc_status, "Out of range (lat ±90, lon ±180)");
-        lv_obj_set_style_text_color(_loc_status, lv_color_hex(C_RED), 0);
+        ui_set_text(_loc_status, "Out of range (lat ±90, lon ±180)");
+        ui_set_text_color(_loc_status, C_RED);
         return;
     }
     NVSConfig::LocationData cur = NVSConfig::loadLocation();
     NVSConfig::saveLocation(lat, lon, cur.valid ? cur.timezone : "UTC");
     uint32_t satId = SatTracker::getState().noradId;
     if (satId > 0) SatTracker::begin(satId);   // reload tracker with new site
-    lv_label_set_text(_loc_status, "Location saved");
-    lv_obj_set_style_text_color(_loc_status, lv_color_hex(C_GREEN), 0);
+    ui_set_text(_loc_status, "Location saved");
+    ui_set_text_color(_loc_status, C_GREEN);
 }
 
-static void _fetch_cb(lv_event_t*) {
-    if (!_norad_buf[0]) {
-        lv_label_set_text(_sat_status, "Enter NORAD ID first");
-        lv_obj_set_style_text_color(_sat_status, lv_color_hex(C_RED), 0);
-        return;
-    }
-    if (WiFi.status() != WL_CONNECTED) {
-        lv_label_set_text(_sat_status, "No WiFi — connect first");
-        lv_obj_set_style_text_color(_sat_status, lv_color_hex(C_RED), 0);
-        return;
-    }
-    lv_label_set_text(_sat_status, "Fetching from Celestrak...");
-    lv_obj_set_style_text_color(_sat_status, lv_color_hex(C_GOLD), 0);
-    lv_refr_now(lv_disp_get_default());   // show "Fetching..." before blocking call
-
-    uint32_t id = (uint32_t)atol(_norad_buf);
-    char url[128];
-    snprintf(url, sizeof(url),
-             "https://celestrak.org/NORAD/elements/gp.php?CATNR=%lu&FORMAT=TLE",
-             (unsigned long)id);
-    String body = HttpUtils::get(url, true, 2);
-
-    if (body.length() < 20) {
-        lv_label_set_text(_sat_status, "Fetch failed — check NORAD ID");
-        lv_obj_set_style_text_color(_sat_status, lv_color_hex(C_RED), 0);
+static bool _fetchPending = false;
+static uint32_t _fetchId = 0;
+static void _finishFetch(uint32_t id, const String& body, int httpCode) {
+    if (httpCode != 200 || body.length() < 20) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "TLE download failed (HTTP %d); check serial log", httpCode);
+        ui_set_text(_sat_status, msg);
+        ui_set_text_color(_sat_status, C_RED);
         return;
     }
     int p1 = body.indexOf('\n');
     int p2 = (p1 >= 0) ? body.indexOf('\n', p1 + 1) : -1;
     int p3 = (p2 >= 0) ? body.indexOf('\n', p2 + 1) : -1;
     if (p1 < 0 || p2 < 0) {
-        lv_label_set_text(_sat_status, "TLE parse error");
-        lv_obj_set_style_text_color(_sat_status, lv_color_hex(C_RED), 0);
+        ui_set_text(_sat_status, "TLE parse error");
+        ui_set_text_color(_sat_status, C_RED);
         return;
     }
     String tname = body.substring(0, p1);     tname.trim();
@@ -145,14 +128,14 @@ static void _fetch_cb(lv_event_t*) {
     String l2    = (p3 > 0) ? body.substring(p2 + 1, p3) : body.substring(p2 + 1);
     l2.trim();
 
-    if (!l1.startsWith("1 ") || !l2.startsWith("2 ")) {
-        lv_label_set_text(_sat_status, "Invalid TLE data");
-        lv_obj_set_style_text_color(_sat_status, lv_color_hex(C_RED), 0);
+    if (!TLEValidation::pairValid(id, l1.c_str(), l2.c_str())) {
+        ui_set_text(_sat_status, "Invalid TLE data");
+        ui_set_text_color(_sat_status, C_RED);
         return;
     }
     if (!TLEManager::storeTLE(id, tname, l1, l2)) {
-        lv_label_set_text(_sat_status, "Storage write failed");
-        lv_obj_set_style_text_color(_sat_status, lv_color_hex(C_RED), 0);
+        ui_set_text(_sat_status, "Storage write failed");
+        ui_set_text_color(_sat_status, C_RED);
         return;
     }
     TLEManager::saveManualCheck(id);
@@ -168,7 +151,10 @@ static void _fetch_cb(lv_event_t*) {
         addedToMySats = NVSConfig::addMySat(id);
     }
     NVSConfig::saveSelectedSat(id);
-    SatTracker::begin(id);
+    if (!SatTracker::begin(id)) {
+        ui_set_text(_sat_status, "TLE stored; SGP4 initialization failed - see log");
+        return;
+    }
 
     char msg[96];
     String sn = tname; sn.trim();
@@ -180,9 +166,38 @@ static void _fetch_cb(lv_event_t*) {
         snprintf(msg, sizeof(msg), "%s - now tracking", sn.c_str());
     else
         snprintf(msg, sizeof(msg), "Tracking %s; MY SATS is full", sn.c_str());
-    lv_label_set_text(_sat_status, msg);
-    lv_obj_set_style_text_color(_sat_status,
-        lv_color_hex(addedToMySats ? C_GREEN : C_GOLD), 0);
+    ui_set_text(_sat_status, msg);
+    ui_set_text_color(_sat_status, addedToMySats ? C_GREEN : C_GOLD);
+}
+
+static void _fetch_cb(lv_event_t*) {
+    if (_fetchPending) return;
+    if (!_norad_buf[0] || WiFi.status() != WL_CONNECTED || !TLEManager::filesystemReady() ||
+        !TLEValidation::timeReady(time(nullptr))) {
+        ui_set_text(_sat_status, !TLEManager::filesystemReady() ? "NO FILESYSTEM - upload assets manually" :
+                          !TLEValidation::timeReady(time(nullptr)) ? "WAITING FOR TIME" :
+                          WiFi.status() != WL_CONNECTED ? "NO WIFI" : "Enter NORAD ID first");
+        return;
+    }
+    _fetchId = (uint32_t)atol(_norad_buf);
+    char url[160];
+    snprintf(url, sizeof(url), "%s?CATNR=%lu&FORMAT=TLE", CELESTRAK_URL, (unsigned long)_fetchId);
+    if (!HttpUtils::startAsyncGet(url)) {
+        ui_set_text(_sat_status, "Network worker busy/unavailable");
+        return;
+    }
+    _fetchPending = true;
+    ui_set_text(_sat_status, "Fetching from CelesTrak...");
+    ui_set_text_color(_sat_status, C_GOLD);
+}
+
+inline void serviceTleRequest() {
+    if (!_fetchPending) return;
+    String body;
+    int code;
+    if (!HttpUtils::takeAsyncResult(body, code)) return;
+    _fetchPending = false;
+    _finishFetch(_fetchId, body, code);
 }
 
 // ── Widget factories ──────────────────────────────────────────────────────────
@@ -192,29 +207,29 @@ static lv_obj_t* _key(lv_obj_t* p, int x, int y, int w, int h,
     lv_obj_t* btn = lv_btn_create(p);
     lv_obj_set_pos(btn, x, y);
     lv_obj_set_size(btn, w, h);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2D333B), 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x404850), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(C_SURF2), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(C_BORDER), LV_STATE_PRESSED);
     lv_obj_set_style_border_width(btn, 0, 0);
     lv_obj_set_style_radius(btn, 4, 0);
     lv_obj_set_style_pad_all(btn, 0, 0);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void*)ud);
     lv_obj_t* l = lv_label_create(btn);
-    lv_label_set_text(l, lbl);
-    lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(l, lv_color_hex(C_VAL), 0);
+    ui_set_text(l, lbl);
+    lv_obj_set_style_text_font(l, UI_F_HEAD, 0);   // large keypad legends
+    ui_set_text_color(l, C_VAL);
     lv_obj_center(l);
     return btn;
 }
 
 static lv_obj_t* _sectionTitle(lv_obj_t* p, int x, int y, int w, const char* text) {
-    lv_obj_t* accent = mk_panel(p, x, y + 5, 4, 13, C_SEC);
+    lv_obj_t* accent = mk_panel(p, x, y + 5, 4, 16, C_CYAN);
     lv_obj_set_style_radius(accent, 2, 0);
 
     lv_obj_t* lbl = lv_label_create(p);
-    lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(C_SEC), 0);
-    lv_obj_set_pos(lbl, x + 12, y + 4);
+    ui_set_text(lbl, text);
+    lv_obj_set_style_text_font(lbl, UI_F_HEAD, 0);
+    ui_set_text_color(lbl, C_SEC);
+    lv_obj_set_pos(lbl, x + 12, y + 2);
     return lbl;
 }
 
@@ -226,11 +241,11 @@ static lv_obj_t* _field(lv_obj_t* p, int x, int y, int w,
     lv_obj_t* box = lv_obj_create(p);
     lv_obj_set_pos(box, x, y);
     lv_obj_set_size(box, w, 42);
-    lv_obj_set_style_bg_color(box, lv_color_hex(0x1C2128), 0);
+    lv_obj_set_style_bg_color(box, lv_color_hex(C_HDR), 0);
     lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(box, 1, 0);
-    lv_obj_set_style_border_color(box, lv_color_hex(C_DIV), 0);
-    lv_obj_set_style_radius(box, 4, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(C_BORDER), 0);
+    lv_obj_set_style_radius(box, 6, 0);
     lv_obj_set_style_pad_left(box, 10, 0);
     lv_obj_set_style_pad_right(box, 10, 0);
     lv_obj_set_style_pad_top(box, 0, 0);
@@ -242,15 +257,15 @@ static lv_obj_t* _field(lv_obj_t* p, int x, int y, int w,
         lv_obj_add_event_cb(box, cb, LV_EVENT_CLICKED, (void*)ud);
     }
     lv_obj_t* tl = lv_label_create(box);
-    lv_label_set_text(tl, tag);
-    lv_obj_set_style_text_font(tl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(tl, lv_color_hex(C_DIM), 0);
+    ui_set_text(tl, tag);
+    lv_obj_set_style_text_font(tl, UI_F_NAV, 0);
+    ui_set_text_color(tl, C_DIM);
     lv_obj_align(tl, LV_ALIGN_LEFT_MID, 0, 0);
 
     lv_obj_t* vl = lv_label_create(box);
-    lv_label_set_text(vl, "--.-");
-    lv_obj_set_style_text_font(vl, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(vl, lv_color_hex(C_CYAN), 0);
+    ui_set_text(vl, "--.-");
+    lv_obj_set_style_text_font(vl, UI_F_BIG, 0);    // Plex Mono 26: coordinates / NORAD
+    ui_set_text_color(vl, C_CYAN);
     lv_obj_align(vl, LV_ALIGN_RIGHT_MID, 0, 0);
     *val_out = vl;
     return box;
@@ -280,8 +295,8 @@ inline void build(lv_obj_t* panel) {
     _lon_sel = _field(panel, 12, 82, 374, "LON", _field_cb, 1, &_lon_val);
 
     if (loc.valid) {
-        lv_label_set_text(_lat_val, _lat_buf);
-        lv_label_set_text(_lon_val, _lon_buf);
+        ui_set_text(_lat_val, _lat_buf);
+        ui_set_text(_lon_val, _lon_buf);
     }
     _refreshSel();
 
@@ -312,11 +327,11 @@ inline void build(lv_obj_t* panel) {
     lv_obj_set_style_pad_all(sb, 0, 0);
     lv_obj_add_event_cb(sb, _save_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* sl = lv_label_create(sb);
-    lv_label_set_text(sl, "SAVE LOCATION");
-    lv_obj_set_style_text_font(sl, &lv_font_montserrat_16, 0);
+    ui_set_text(sl, "SAVE LOCATION");
+    lv_obj_set_style_text_font(sl, UI_F_HEAD, 0);
     lv_obj_center(sl);
 
-    _loc_status = mk_label(panel, &lv_font_montserrat_14, C_GREEN, 16, 358, "");
+    _loc_status = mk_label(panel, UI_F_LABEL, C_GREEN, 16, 358, "");
 
     // FIRMWARE UPDATE button
     lv_obj_t* fw = lv_btn_create(panel);
@@ -329,9 +344,9 @@ inline void build(lv_obj_t* panel) {
     lv_obj_set_style_pad_all(fw, 0, 0);
     lv_obj_add_event_cb(fw, [](lv_event_t*) { openFirmwareUpdate(); }, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* fwl = lv_label_create(fw);
-    lv_label_set_text(fwl, "FIRMWARE UPDATE");
-    lv_obj_set_style_text_font(fwl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(fwl, lv_color_hex(0xD5E2EF), 0);
+    ui_set_text(fwl, "FIRMWARE UPDATE");
+    lv_obj_set_style_text_font(fwl, UI_F_NAV, 0);
+    ui_set_text_color(fwl, 0xD5E2EF);
     lv_obj_center(fwl);
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -342,7 +357,7 @@ inline void build(lv_obj_t* panel) {
 
     // NORAD ID field aligned with LON field
     _field(panel, RX + 12, 82, 374, "NORAD ID", nullptr, 0, &_norad_val);
-    lv_label_set_text(_norad_val, "------");
+    ui_set_text(_norad_val, "------");
 
     // NORAD numpad: 3 cols × 4 rows, centered in 398 px
     const int NKX0 = RX + 65, NKY0 = 136;
@@ -368,11 +383,11 @@ inline void build(lv_obj_t* panel) {
     lv_obj_set_style_pad_all(fb, 0, 0);
     lv_obj_add_event_cb(fb, _fetch_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* fl = lv_label_create(fb);
-    lv_label_set_text(fl, "FETCH & TRACK");
-    lv_obj_set_style_text_font(fl, &lv_font_montserrat_16, 0);
+    ui_set_text(fl, "FETCH & TRACK");
+    lv_obj_set_style_text_font(fl, UI_F_HEAD, 0);
     lv_obj_center(fl);
 
-    _sat_status = mk_label(panel, &lv_font_montserrat_14, C_DIM, RX + 14, 54, "");
+    _sat_status = mk_label(panel, UI_F_LABEL, C_DIM, RX + 14, 54, "");
     lv_obj_set_width(_sat_status, 370);
 
     // MANAGE LIST button
@@ -391,15 +406,15 @@ inline void build(lv_obj_t* panel) {
     lv_obj_add_flag(manage, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(manage, [](lv_event_t*) { ScreenManageList::open(); }, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* ml = lv_label_create(manage);
-    lv_label_set_text(ml, "MANAGE LIST");
-    lv_obj_set_style_text_font(ml, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(ml, lv_color_hex(0xD8B8F5), 0);
+    ui_set_text(ml, "MANAGE LIST");
+    lv_obj_set_style_text_font(ml, UI_F_NAV, 0);
+    ui_set_text_color(ml, 0xD8B8F5);
     lv_obj_center(ml);
 
 }
 
 inline void onShow() {
-    if (_sat_status) lv_label_set_text(_sat_status, "");
+    if (_sat_status) ui_set_text(_sat_status, "");
 }
 
 inline void update() {}

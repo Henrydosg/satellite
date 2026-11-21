@@ -6,7 +6,6 @@
 #include "screens_common.h"
 #include "sat_tracker.h"
 
-LV_FONT_DECLARE(JetBrainsMono_Regular_18);
 
 namespace ScreenISS {
 
@@ -63,16 +62,16 @@ static const char* dirForAz(double az) {
 }
 
 static void setEmptyRow(int i) {
-    lv_label_set_text(lbl_row_time[i], "--- --/-- --:--");
-    lv_label_set_text(lbl_row_dur[i], "--m --s");
-    lv_label_set_text(lbl_row_max[i], "--");
-    lv_label_set_text(lbl_row_appears[i], "---");
-    lv_label_set_text(lbl_row_disappears[i], "---");
-    lv_obj_set_style_text_color(lbl_row_time[i],       lv_color_hex(C_DIM), 0);
-    lv_obj_set_style_text_color(lbl_row_dur[i],        lv_color_hex(C_DIM), 0);
-    lv_obj_set_style_text_color(lbl_row_max[i],        lv_color_hex(C_DIM), 0);
-    lv_obj_set_style_text_color(lbl_row_appears[i],    lv_color_hex(C_DIM), 0);
-    lv_obj_set_style_text_color(lbl_row_disappears[i], lv_color_hex(C_DIM), 0);
+    ui_set_text(lbl_row_time[i], "--- --/-- --:--");
+    ui_set_text(lbl_row_dur[i], "--m --s");
+    ui_set_text(lbl_row_max[i], "--");
+    ui_set_text(lbl_row_appears[i], "---");
+    ui_set_text(lbl_row_disappears[i], "---");
+    ui_set_text_color(lbl_row_time[i], C_DIM);
+    ui_set_text_color(lbl_row_dur[i], C_DIM);
+    ui_set_text_color(lbl_row_max[i], C_DIM);
+    ui_set_text_color(lbl_row_appears[i], C_DIM);
+    ui_set_text_color(lbl_row_disappears[i], C_DIM);
 }
 
 // ── Polar canvas helpers ──────────────────────────────────────────────────────
@@ -168,7 +167,7 @@ static void _computeTimerCb(lv_timer_t* tmr) {
     _ov_circ(lx, ly, lv_color_hex(C_RED),   5);
     _ov_circ(mx, my, lv_color_hex(C_GOLD),  5);
 
-    lv_obj_add_flag(_ov_lbl_computing, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_ov_lbl_computing, true);
 }
 
 // ── showDetail / hideDetail ───────────────────────────────────────────────────
@@ -189,39 +188,38 @@ static void showDetail(int idx) {
 
     char buf[64];
     snprintf(buf, sizeof(buf), "ISS SIGHTING #%d", idx + 1);
-    lv_label_set_text(_ov_lbl_hdr, buf);
+    ui_set_text(_ov_lbl_hdr, buf);
 
     struct tm ti{};
     time_t t = s.start;
     localtime_r(&t, &ti);
     strftime(buf, sizeof(buf), "%a %d/%m  %H:%M", &ti);
-    lv_label_set_text(_ov_lbl_date, buf);
+    ui_set_text(_ov_lbl_date, buf);
 
     int dur = (int)(s.stop - s.start);
     if (dur < 60)
         snprintf(buf, sizeof(buf), "< 1m");
     else
         snprintf(buf, sizeof(buf), "%dm", (dur + 30) / 60);
-    lv_label_set_text(_ov_lbl_dur, buf);
+    ui_set_text(_ov_lbl_dur, buf);
 
     snprintf(buf, sizeof(buf), "%.0f\xc2\xb0", s.maxEl);
-    lv_label_set_text(_ov_lbl_maxel, buf);
-    lv_obj_set_style_text_color(_ov_lbl_maxel,
-        lv_color_hex(s.maxEl >= 45.0 ? C_GREEN : C_GOLD), 0);
+    ui_set_text(_ov_lbl_maxel, buf);
+    ui_set_text_color(_ov_lbl_maxel, s.maxEl >= 45.0 ? C_GREEN : C_GOLD);
 
     snprintf(buf, sizeof(buf), "%.0f\xc2\xb0 %s", s.elStart, dirForAz(s.azStart));
-    lv_label_set_text(_ov_lbl_appears, buf);
+    ui_set_text(_ov_lbl_appears, buf);
 
     snprintf(buf, sizeof(buf), "%.0f\xc2\xb0 %s", s.elStop, dirForAz(s.azStop));
-    lv_label_set_text(_ov_lbl_disapp, buf);
+    ui_set_text(_ov_lbl_disapp, buf);
 
-    lv_label_set_text(_ov_lbl_status, "");
-    lv_obj_add_flag(_ov_marker, LV_OBJ_FLAG_HIDDEN);
+    ui_set_text(_ov_lbl_status, "");
+    ui_set_hidden(_ov_marker, true);
     _ov_blink = true;
 
     // Show "Please wait" over the grid, then show the overlay
-    lv_obj_clear_flag(_ov_lbl_computing, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(_ov_panel, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_ov_lbl_computing, false);
+    ui_set_hidden(_ov_panel, false);
 
     // Phase 2: defer the 300+ SGP4 calls to the next LVGL render tick
     _computeTimer = lv_timer_create(_computeTimerCb, 10, nullptr);
@@ -230,8 +228,8 @@ static void showDetail(int idx) {
 
 static void hideDetail() {
     if (_computeTimer) { lv_timer_del(_computeTimer); _computeTimer = nullptr; }
-    if (_ov_panel)  lv_obj_add_flag(_ov_panel,  LV_OBJ_FLAG_HIDDEN);
-    if (_ov_marker) lv_obj_add_flag(_ov_marker, LV_OBJ_FLAG_HIDDEN);
+    if (_ov_panel)  ui_set_hidden(_ov_panel, true);
+    if (_ov_marker) ui_set_hidden(_ov_marker, true);
     _detailIdx = -1;
 }
 
@@ -242,9 +240,9 @@ static void _row_cb(lv_event_t* e) {
 
 // ── Build ─────────────────────────────────────────────────────────────────────
 inline void build(lv_obj_t* panel) {
-    const lv_font_t* F12 = &lv_font_montserrat_12;
-    const lv_font_t* F14 = &lv_font_montserrat_14;
-    const lv_font_t* FT  = &JetBrainsMono_Regular_18;
+    const lv_font_t* F12 = UI_F_LABEL;
+    const lv_font_t* F14 = UI_F_LABEL;
+    const lv_font_t* FT  = UI_F_VAL;
 
     // ── Sightings table ───────────────────────────────────────────────────────
     lv_obj_t* hdr = mk_panel(panel, 0, 0, CONTENT_W, HDR_H, C_HDR);
@@ -253,9 +251,9 @@ inline void build(lv_obj_t* panel) {
     const char* hdr_texts[] = { "#", "Date", "Visible", "Max", "Appears", "Disappears" };
     for (int c = 0; c < 6; c++) {
         lv_obj_t* h = lv_label_create(hdr);
-        lv_label_set_text(h, hdr_texts[c]);
-        lv_obj_set_style_text_font(h, FT, 0);
-        lv_obj_set_style_text_color(h, lv_color_hex(C_SEC), 0);
+        ui_set_text(h, hdr_texts[c]);
+        lv_obj_set_style_text_font(h, UI_F_NAV, 0);
+        ui_set_text_color(h, C_SEC);
         lv_obj_align(h, LV_ALIGN_LEFT_MID, COLS[c], 0);
     }
 
@@ -274,15 +272,15 @@ inline void build(lv_obj_t* panel) {
 
         // Chevron — "tap for detail" hint
         lv_obj_t* chev = lv_label_create(row);
-        lv_label_set_text(chev, ">");
+        ui_set_text(chev, ">");
         lv_obj_set_style_text_font(chev, FT, 0);
-        lv_obj_set_style_text_color(chev, lv_color_hex(C_DIM), 0);
+        ui_set_text_color(chev, C_DIM);
         lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -8, 0);
 
         lbl_row_num[i] = lv_label_create(row);
         lv_label_set_text_fmt(lbl_row_num[i], "%d", i + 1);
         lv_obj_set_style_text_font(lbl_row_num[i], F14, 0);
-        lv_obj_set_style_text_color(lbl_row_num[i], lv_color_hex(C_DIM), 0);
+        ui_set_text_color(lbl_row_num[i], C_DIM);
         lv_obj_align(lbl_row_num[i], LV_ALIGN_LEFT_MID, COLS[0], 0);
 
         lbl_row_time[i] = lv_label_create(row);
@@ -308,30 +306,30 @@ inline void build(lv_obj_t* panel) {
         setEmptyRow(i);
     }
 
-    _lbl_empty = mk_label(panel, &lv_font_montserrat_18, C_DIM, 0, 168,
+    _lbl_empty = mk_label(panel, UI_F_HEAD, C_DIM, 0, 168,
                           "No ISS naked-eye sightings in the next 7 days");
     lv_obj_set_width(_lbl_empty, CONTENT_W);
     lv_obj_set_style_text_align(_lbl_empty, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_add_flag(_lbl_empty, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_lbl_empty, true);
 
-    _lbl_no_more = mk_label(panel, &lv_font_montserrat_16, C_DIM, 0, 0,
+    _lbl_no_more = mk_label(panel, UI_F_NAV, C_DIM, 0, 0,
                             "No additional naked-eye sightings in the 7-day window");
     lv_obj_set_width(_lbl_no_more, CONTENT_W);
     lv_obj_set_style_text_align(_lbl_no_more, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_add_flag(_lbl_no_more, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_lbl_no_more, true);
 
     _lbl_loading = lv_label_create(panel);
-    lv_label_set_text(_lbl_loading, "Please wait, computing...");
-    lv_obj_set_style_text_font(_lbl_loading, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(_lbl_loading, lv_color_hex(C_SEC), 0);
+    ui_set_text(_lbl_loading, "Please wait, computing...");
+    lv_obj_set_style_text_font(_lbl_loading, UI_F_NAV, 0);
+    ui_set_text_color(_lbl_loading, C_SEC);
     lv_obj_set_width(_lbl_loading, CONTENT_W);
     lv_obj_set_style_text_align(_lbl_loading, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(_lbl_loading, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_add_flag(_lbl_loading, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_lbl_loading, true);
 
     // ── Overlay (built last → renders on top of the table) ────────────────────
     _ov_panel = mk_panel(panel, 0, 0, CONTENT_W, CONTENT_H, C_BG);
-    lv_obj_add_flag(_ov_panel, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_ov_panel, true);
 
     // Polar canvas (530 × 400 px)
     _ov_cbuf = (lv_color_t*)ps_malloc((size_t)OV_COL_W * CONTENT_H * sizeof(lv_color_t));
@@ -359,11 +357,11 @@ inline void build(lv_obj_t* panel) {
     mk_label(_ov_panel, F12, C_DIM, OV_CX - 14, OV_CY - 14, "90\xc2\xb0");
 
     // "Please wait" label — centred over the polar, shown during arc computation
-    _ov_lbl_computing = mk_label(_ov_panel, &lv_font_montserrat_16, C_SEC,
+    _ov_lbl_computing = mk_label(_ov_panel, UI_F_NAV, C_SEC,
                                   0, OV_CY - 12, "Please wait, computing...");
     lv_obj_set_width(_ov_lbl_computing, OV_COL_W);
     lv_obj_set_style_text_align(_ov_lbl_computing, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_add_flag(_ov_lbl_computing, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_ov_lbl_computing, true);
 
     // Divider between polar and info column
     mk_panel(_ov_panel, OV_COL_W, 0, 1, CONTENT_H, C_DIV);
@@ -373,33 +371,33 @@ inline void build(lv_obj_t* panel) {
     const int VX = OV_COL_W + 8;    // value origin (right-aligned within column)
     const int VW = OV_INFO_W - 14;  // value label width (6 px right margin)
 
-    _ov_lbl_hdr = mk_label(_ov_panel, FT, C_SEC, OV_COL_W, 12);
+    _ov_lbl_hdr = mk_label(_ov_panel, UI_F_HEAD, C_SEC, OV_COL_W, 11);
     lv_obj_set_width(_ov_lbl_hdr, OV_INFO_W);
     lv_obj_set_style_text_align(_ov_lbl_hdr, LV_TEXT_ALIGN_CENTER, 0);
 
     mk_panel(_ov_panel, OV_COL_W + 10, 38, OV_INFO_W - 20, 1, C_DIV);
 
-    mk_label(_ov_panel, FT, C_DIM, IX, 50, "DATE");
+    mk_label(_ov_panel, UI_F_LABEL, C_DIM, IX, 50 + 1, "DATE");
     _ov_lbl_date = mk_label(_ov_panel, FT, C_VAL, VX, 50);
     lv_obj_set_width(_ov_lbl_date, VW);
     lv_obj_set_style_text_align(_ov_lbl_date, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(_ov_panel, FT, C_DIM, IX, 80, "DUR");
+    mk_label(_ov_panel, UI_F_LABEL, C_DIM, IX, 80 + 1, "DUR");
     _ov_lbl_dur = mk_label(_ov_panel, FT, C_VAL, VX, 80);
     lv_obj_set_width(_ov_lbl_dur, VW);
     lv_obj_set_style_text_align(_ov_lbl_dur, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(_ov_panel, FT, C_DIM, IX, 110, "MAX");
+    mk_label(_ov_panel, UI_F_LABEL, C_DIM, IX, 110 + 1, "MAX");
     _ov_lbl_maxel = mk_label(_ov_panel, FT, C_GOLD, VX, 110);
     lv_obj_set_width(_ov_lbl_maxel, VW);
     lv_obj_set_style_text_align(_ov_lbl_maxel, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(_ov_panel, FT, C_DIM, IX, 140, "APR");
+    mk_label(_ov_panel, UI_F_LABEL, C_DIM, IX, 140 + 1, "APR");
     _ov_lbl_appears = mk_label(_ov_panel, FT, C_VAL, VX, 140);
     lv_obj_set_width(_ov_lbl_appears, VW);
     lv_obj_set_style_text_align(_ov_lbl_appears, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(_ov_panel, FT, C_DIM, IX, 170, "DIS");
+    mk_label(_ov_panel, UI_F_LABEL, C_DIM, IX, 170 + 1, "DIS");
     _ov_lbl_disapp = mk_label(_ov_panel, FT, C_VAL, VX, 170);
     lv_obj_set_width(_ov_lbl_disapp, VW);
     lv_obj_set_style_text_align(_ov_lbl_disapp, LV_TEXT_ALIGN_RIGHT, 0);
@@ -432,9 +430,9 @@ inline void build(lv_obj_t* panel) {
     lv_obj_add_flag(close_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(close_btn, [](lv_event_t*) { hideDetail(); }, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* close_lbl = lv_label_create(close_btn);
-    lv_label_set_text(close_lbl, "CLOSE");
-    lv_obj_set_style_text_font(close_lbl, FT, 0);
-    lv_obj_set_style_text_color(close_lbl, lv_color_hex(C_SEC), 0);
+    ui_set_text(close_lbl, "CLOSE");
+    lv_obj_set_style_text_font(close_lbl, UI_F_HEAD, 0);
+    ui_set_text_color(close_lbl, C_SEC);
     lv_obj_set_style_text_color(close_lbl, lv_color_hex(C_BG), LV_STATE_PRESSED);
     lv_obj_center(close_lbl);
 
@@ -448,16 +446,16 @@ inline void build(lv_obj_t* panel) {
     lv_obj_set_style_border_width(_ov_marker, 1, 0);
     lv_obj_set_style_pad_all(_ov_marker, 0, 0);
     lv_obj_clear_flag(_ov_marker, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(_ov_marker, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_ov_marker, true);
 }
 
 // ── onShow (called once when navigating to this screen) ──────────────────────
 inline void onShow() {
     if (SatTracker::issSightingsAreFresh()) return;
-    lv_obj_clear_flag(_lbl_loading, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_lbl_loading, false);
     lv_refr_now(lv_disp_get_default());
     SatTracker::recomputeIssSightings();
-    lv_obj_add_flag(_lbl_loading, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_lbl_loading, true);
 }
 
 inline const char* title() {
@@ -488,26 +486,26 @@ inline void update() {
                 int cx, cy; _ov_toXY(ea.az, ea.el, &cx, &cy);
                 lv_obj_set_pos(_ov_marker, cx - 5, cy - 5);
                 _ov_blink = !_ov_blink;
-                if (_ov_blink) lv_obj_clear_flag(_ov_marker, LV_OBJ_FLAG_HIDDEN);
-                else           lv_obj_add_flag(_ov_marker,   LV_OBJ_FLAG_HIDDEN);
+                if (_ov_blink) ui_set_hidden(_ov_marker, false);
+                else           ui_set_hidden(_ov_marker, true);
             } else {
-                lv_obj_add_flag(_ov_marker, LV_OBJ_FLAG_HIDDEN);
+                ui_set_hidden(_ov_marker, true);
             }
-            lv_label_set_text(_ov_lbl_status, "VISIBLE NOW");
-            lv_obj_set_style_text_color(_ov_lbl_status, lv_color_hex(C_GREEN), 0);
+            ui_set_text(_ov_lbl_status, "VISIBLE NOW");
+            ui_set_text_color(_ov_lbl_status, C_GREEN);
         } else if (now < s.start) {
-            lv_obj_add_flag(_ov_marker, LV_OBJ_FLAG_HIDDEN);
+            ui_set_hidden(_ov_marker, true);
             int secs = (int)(s.start - now);
             int h = secs / 3600, m = (secs % 3600) / 60, sc = secs % 60;
             if (h > 0)      snprintf(buf, sizeof(buf), "in %dh %02dm", h, m);
             else if (m > 0) snprintf(buf, sizeof(buf), "in %dm %02ds", m, sc);
             else            snprintf(buf, sizeof(buf), "in %ds", secs);
-            lv_label_set_text(_ov_lbl_status, buf);
-            lv_obj_set_style_text_color(_ov_lbl_status, lv_color_hex(C_GOLD), 0);
+            ui_set_text(_ov_lbl_status, buf);
+            ui_set_text_color(_ov_lbl_status, C_GOLD);
         } else {
-            lv_obj_add_flag(_ov_marker, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(_ov_lbl_status, "PASSED");
-            lv_obj_set_style_text_color(_ov_lbl_status, lv_color_hex(C_DIM), 0);
+            ui_set_hidden(_ov_marker, true);
+            ui_set_text(_ov_lbl_status, "PASSED");
+            ui_set_text_color(_ov_lbl_status, C_DIM);
         }
         return;
     }
@@ -520,9 +518,9 @@ inline void update() {
     char buf[64];
 
     if (count == 0)
-        lv_obj_clear_flag(_lbl_empty, LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_lbl_empty, false);
     else
-        lv_obj_add_flag(_lbl_empty, LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_lbl_empty, true);
 
     if (_lbl_no_more) {
         if (count > 0 && count < SatTracker::MAX_ISS_SIGHTINGS) {
@@ -530,51 +528,51 @@ inline void update() {
             int remainingHeight = CONTENT_H - remainingTop;
             lv_obj_set_y(_lbl_no_more,
                          remainingTop + (remainingHeight - 20) / 2);
-            lv_obj_clear_flag(_lbl_no_more, LV_OBJ_FLAG_HIDDEN);
+            ui_set_hidden(_lbl_no_more, false);
         } else {
-            lv_obj_add_flag(_lbl_no_more, LV_OBJ_FLAG_HIDDEN);
+            ui_set_hidden(_lbl_no_more, true);
         }
     }
 
     for (int i = 0; i < SatTracker::MAX_ISS_SIGHTINGS; i++) {
         if (i >= count || !list[i].valid) {
             setEmptyRow(i);
-            lv_obj_add_flag(sighting_rows[i], LV_OBJ_FLAG_HIDDEN);
+            ui_set_hidden(sighting_rows[i], true);
             continue;
         }
 
-        lv_obj_clear_flag(sighting_rows[i], LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(sighting_rows[i], false);
 
         const SatTracker::IssSighting& s = list[i];
         time_t t = s.start;
         localtime_r(&t, &ti);
         strftime(buf, sizeof(buf), "%a %d/%m %H:%M", &ti);
-        lv_label_set_text(lbl_row_time[i], buf);
+        ui_set_text(lbl_row_time[i], buf);
 
         int dur = (int)(s.stop - s.start);
         if (dur < 60)
             snprintf(buf, sizeof(buf), "< 1m");
         else
             snprintf(buf, sizeof(buf), "%dm", (dur + 30) / 60);
-        lv_label_set_text(lbl_row_dur[i], buf);
+        ui_set_text(lbl_row_dur[i], buf);
 
         snprintf(buf, sizeof(buf), "%.0f\xc2\xb0", s.maxEl);
-        lv_label_set_text(lbl_row_max[i], buf);
+        ui_set_text(lbl_row_max[i], buf);
 
         snprintf(buf, sizeof(buf), "%.0f\xc2\xb0 %s", s.elStart, dirForAz(s.azStart));
-        lv_label_set_text(lbl_row_appears[i], buf);
+        ui_set_text(lbl_row_appears[i], buf);
 
         snprintf(buf, sizeof(buf), "%.0f\xc2\xb0 %s", s.elStop, dirForAz(s.azStop));
-        lv_label_set_text(lbl_row_disappears[i], buf);
+        ui_set_text(lbl_row_disappears[i], buf);
 
         bool active = (now >= s.start && now <= s.stop);
         uint32_t mainColor = active ? C_GREEN : C_SEC;
         uint32_t maxColor  = (s.maxEl >= 45.0) ? C_GREEN : C_GOLD;
-        lv_obj_set_style_text_color(lbl_row_time[i],       lv_color_hex(mainColor), 0);
-        lv_obj_set_style_text_color(lbl_row_dur[i],        lv_color_hex(active ? C_GREEN : C_DIM), 0);
-        lv_obj_set_style_text_color(lbl_row_max[i],        lv_color_hex(maxColor), 0);
-        lv_obj_set_style_text_color(lbl_row_appears[i],    lv_color_hex(C_VAL), 0);
-        lv_obj_set_style_text_color(lbl_row_disappears[i], lv_color_hex(C_VAL), 0);
+        ui_set_text_color(lbl_row_time[i], mainColor);
+        ui_set_text_color(lbl_row_dur[i], active ? C_GREEN : C_DIM);
+        ui_set_text_color(lbl_row_max[i], maxColor);
+        ui_set_text_color(lbl_row_appears[i], C_VAL);
+        ui_set_text_color(lbl_row_disappears[i], C_VAL);
     }
 }
 

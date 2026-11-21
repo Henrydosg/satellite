@@ -15,9 +15,54 @@
 #pragma once
 #include <Arduino.h>
 #include <Wire.h>
+#include <stdarg.h>
+#include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <LovyanGFX.hpp>
 #include <lgfx/v1/platforms/esp32s3/Bus_RGB.hpp>
 #include <lgfx/v1/platforms/esp32s3/Panel_RGB.hpp>
+
+// Boot milestones go to CH343/UART0 as well as native USB CDC. Never wait for
+// a USB host: an absent monitor must not prevent display initialization.
+namespace BootDiagnostics {
+static void begin() {
+#if ARDUINO_USB_CDC_ON_BOOT
+    Serial0.begin(115200);
+#endif
+    Serial.begin(115200);
+#if ARDUINO_USB_CDC_ON_BOOT
+    Serial.setTxTimeoutMs(0);
+#endif
+}
+
+static void log(const char* format, ...) __attribute__((format(printf, 1, 2)));
+static void log(const char* format, ...) {
+    char message[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+#if ARDUINO_USB_CDC_ON_BOOT
+    Serial0.printf("[%lu ms] %s\n", (unsigned long)millis(), message);
+#endif
+    Serial.printf("[%lu ms] %s\n", (unsigned long)millis(), message);
+}
+
+static void memory(const char* stage) {
+    log("[memory] %s: PSRAM=%s size=%u free=%u largest=%u; DMA free=%u largest=%u",
+        stage, psramFound() ? "found" : "NOT FOUND", ESP.getPsramSize(),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+}
+
+[[noreturn]] static void halt(const char* stage) {
+    log("[FATAL] Startup stopped at %s; no automatic reset or erase.", stage);
+    memory(stage);
+    for (;;) delay(1000);
+}
+}
 
 // ─── CH422G IO expander ───────────────────────────────────────────────────────
 // Two-address protocol:
@@ -30,18 +75,22 @@
 #define CH_DISP     0x04   // EXIO2 — backlight enable
 #define CH_LCD_VDD  0x40   // EXIO6 — LCD VDD power rail
 
-static void ch422g_set_output_mode() {
+static bool ch422g_set_output_mode() {
     Wire.beginTransmission(CH422G_WR_SET);
     Wire.write(0x01);
-    Wire.endTransmission();
+    uint8_t status = Wire.endTransmission();
+    BootDiagnostics::log("[i2c] CH422G WR_SET=0x01 status=%u (0=ACK)", status);
+    return status == 0;
 }
-static void ch422g_write(uint8_t val) {
+static bool ch422g_write(uint8_t val) {
     Wire.beginTransmission(CH422G_WR_IO);
     Wire.write(val);
-    Wire.endTransmission();
+    uint8_t status = Wire.endTransmission();
+    BootDiagnostics::log("[i2c] CH422G WR_IO=0x%02X status=%u (0=ACK)", val, status);
+    return status == 0;
 }
 
-static void display_write_outputs(bool backlightOn, bool touchResetReleased) {
+static bool display_write_outputs(bool backlightOn, bool touchResetReleased) {
     uint8_t outputs = CH_LCD_VDD;
     if (backlightOn) {
         outputs |= CH_DISP;
@@ -49,16 +98,19 @@ static void display_write_outputs(bool backlightOn, bool touchResetReleased) {
     if (touchResetReleased) {
         outputs |= CH_TP_RST;
     }
-    ch422g_write(outputs);
+    return ch422g_write(outputs);
 }
 
-static void display_set_backlight(bool enabled) {
+static bool display_set_backlight(bool enabled) {
     // Use LovyanGFX's I2C directly — Arduino Wire.begin/end reinitializes
     // I2C_NUM_0 which LovyanGFX owns for GT911 touch, breaking getTouch() calls.
     uint8_t outputs = CH_LCD_VDD | CH_TP_RST;
     if (enabled) outputs |= CH_DISP;
-    lgfx::i2c::transactionWrite(0, CH422G_WR_IO, &outputs, 1, 400000);
+    bool ok = lgfx::i2c::transactionWrite(0, CH422G_WR_IO, &outputs, 1, 400000).has_value();
+    BootDiagnostics::log("[backlight] WR_IO=0x%02X after TFT init: %s", outputs,
+                         ok ? "ACK" : "FAILED");
     delay(1);
+    return ok;
 }
 
 // ─── LGFX class ───────────────────────────────────────────────────────────────
@@ -150,21 +202,46 @@ extern LGFX tft;
 
 // ─── initTFT() ───────────────────────────────────────────────────────────────
 // Call once from setup(), BEFORE lv_init() / lvgl_setup().
-static void initTFT(bool backlightOn = true) {
+static bool initTFT(bool backlightOn = true) {
     // 1. Configure CH422G EXIO as outputs
-    Wire.begin(8, 9);
-    ch422g_set_output_mode();               // WR_SET ← 0x01
+    BootDiagnostics::log("[i2c] Starting SDA=8 SCL=9");
+    if (!Wire.begin(8, 9)) {
+        BootDiagnostics::log("[i2c] Wire.begin FAILED");
+        return false;
+    }
+    if (!ch422g_set_output_mode()) {
+        Wire.end();
+        return false;
+    }
     delay(1);
     // 2. Power LCD with optional backlight; keep TP_RST low (reset GT911)
-    display_write_outputs(backlightOn, false);
+    if (!display_write_outputs(backlightOn, false)) {
+        Wire.end();
+        return false;
+    }
     delay(10);
     // 3. Release GT911 reset
-    display_write_outputs(backlightOn, true);
+    if (!display_write_outputs(backlightOn, true)) {
+        Wire.end();
+        return false;
+    }
     delay(50);
     Wire.end();
 
     // 4. Initialise display
-    tft.init();
+    BootDiagnostics::memory("before TFT init");
+    BootDiagnostics::log("[tft] Initializing RGB 800x480");
+    if (!tft.init()) {
+        BootDiagnostics::log("[tft] init FAILED; framebuffer drawing skipped");
+        return false;
+    }
+    BootDiagnostics::log("[tft] RGB initialization OK; GT911=%s",
+                         tft.getPanel()->initTouch() ? "ready" : "NOT RESPONDING");
+    // Reassert the same output mask through LovyanGFX's I2C owner. This does
+    // not change EXIO3 or any GPIO mapping, and does not reinitialize Wire.
+    if (!display_set_backlight(backlightOn)) return false;
     tft.setRotation(2);   // 0=normal  2=180°
     tft.fillScreen(TFT_BLACK);
+    BootDiagnostics::log("[tft] Initial framebuffer clear complete");
+    return true;
 }

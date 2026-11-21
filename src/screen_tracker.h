@@ -9,9 +9,6 @@
 #include "http_utils.h"
 #include "moon_widget.h"
 
-LV_FONT_DECLARE(JetBrainsMono_Regular_20);
-LV_FONT_DECLARE(JetBrainsMono_Bold_28);
-
 namespace ScreenTracker {
 
 // ── Layout ────────────────────────────────────────────────────────────────────
@@ -42,6 +39,12 @@ static lv_obj_t *_tle_close_label = nullptr;
 static lv_obj_t *_tracker_panel = nullptr;
 static uint32_t  _check_cache_id = 0;
 static time_t    _check_cache_success = 0;
+static bool _tleRequestPending = false;
+static uint32_t _tleRequestId = 0;
+static float _tleRequestOldAge = 0;
+
+static void _setText(lv_obj_t* label, const char* text) { ui_set_text(label, text); }
+static void _setTextColor(lv_obj_t* label, uint32_t hex) { ui_set_text_color(label, hex); }
 
 static time_t _lastSuccessfulCheck(uint32_t id, bool force = false) {
     if (force || id != _check_cache_id) {
@@ -92,12 +95,12 @@ static void _closeTleModal(lv_event_t*) {
 }
 
 static void _tleResultLayout() {
-    if (_tle_check_btn) lv_obj_add_flag(_tle_check_btn, LV_OBJ_FLAG_HIDDEN);
+    if (_tle_check_btn) ui_set_hidden(_tle_check_btn, true);
     if (_tle_close_btn) lv_obj_set_pos(_tle_close_btn, 190, 202);
     if (_tle_close_label) lv_label_set_text(_tle_close_label, "CLOSE");
 }
 
-static bool _parseTleResponse(const String& body, String& name, String& l1, String& l2) {
+static bool _parseTleResponse(uint32_t id, const String& body, String& name, String& l1, String& l2) {
     int p1 = body.indexOf('\n');
     int p2 = p1 >= 0 ? body.indexOf('\n', p1 + 1) : -1;
     int p3 = p2 >= 0 ? body.indexOf('\n', p2 + 1) : -1;
@@ -105,38 +108,13 @@ static bool _parseTleResponse(const String& body, String& name, String& l1, Stri
     name = body.substring(0, p1); name.trim();
     l1 = body.substring(p1 + 1, p2); l1.trim();
     l2 = p3 >= 0 ? body.substring(p2 + 1, p3) : body.substring(p2 + 1); l2.trim();
-    return l1.startsWith("1 ") && l2.startsWith("2 ") &&
-           TLEManager::epochFromLine1(l1.c_str()) != 0;
+    return TLEValidation::pairValid(id, l1.c_str(), l2.c_str());
 }
 
-static void _checkTleUpdate(lv_event_t*) {
-    const SatTracker::State& current = SatTracker::getState();
-    uint32_t id = current.noradId;
-    float oldAge = current.tleAgeHours;
-
-    lv_label_set_text(_tle_status, "Checking CelesTrak for this satellite...");
-    lv_obj_set_style_text_color(_tle_status, lv_color_hex(C_GOLD), 0);
-    lv_obj_add_state(_tle_check_btn, LV_STATE_DISABLED);
-    _tleResultLayout();
-    lv_refr_now(lv_disp_get_default());
-
-    // Count every attempted request toward the cooldown, including failures.
-    TLEManager::saveManualCheck(id);
-
+static void _finishTleUpdate(uint32_t id, float oldAge, const String& body, int httpCode) {
     char oldName[30], oldL1[70], oldL2[70];
-    if (!TLEManager::loadTLE(id, oldName, oldL1, oldL2)) {
-        lv_label_set_text(_tle_status, "Local TLE could not be read. Nothing changed.");
-        lv_obj_set_style_text_color(_tle_status, lv_color_hex(C_RED), 0);
-        return;
-    }
-    time_t oldEpoch = TLEManager::epochFromLine1(oldL1);
-
-    char url[160];
-    snprintf(url, sizeof(url),
-             "https://celestrak.org/NORAD/elements/gp.php?CATNR=%lu&FORMAT=TLE",
-             (unsigned long)id);
-    int httpCode = -1;
-    String body = HttpUtils::get(url, true, 1, &httpCode);
+    time_t oldEpoch = TLEManager::loadTLE(id, oldName, oldL1, oldL2)
+                     ? TLEManager::epochFromLine1(oldL1) : 0;
     if (httpCode != 200) {
         char msg[180];
         if (httpCode == 403)
@@ -151,7 +129,7 @@ static void _checkTleUpdate(lv_event_t*) {
     }
 
     String newName, newL1, newL2;
-    if (!_parseTleResponse(body, newName, newL1, newL2)) {
+    if (!_parseTleResponse(id, body, newName, newL1, newL2)) {
         lv_label_set_text(_tle_status, "CelesTrak returned invalid TLE data. Local TLE retained.");
         lv_obj_set_style_text_color(_tle_status, lv_color_hex(C_RED), 0);
         return;
@@ -192,15 +170,53 @@ static void _checkTleUpdate(lv_event_t*) {
         return;
     }
     _waitingForPass = true;
-    if (_lbl_computing) lv_obj_clear_flag(_lbl_computing, LV_OBJ_FLAG_HIDDEN);
+    if (_lbl_computing) ui_set_hidden(_lbl_computing, false);
     char oldText[16], newText[16];
     _formatAgeHHMM(oldAge, oldText, sizeof(oldText));
     _formatAgeHHMM(newAge, newText, sizeof(newText));
     snprintf(msg, sizeof(msg),
-             "Newer TLE installed.\nPrevious age: %s   New age: %s\nTracking and passes recalculated.",
+             "Newer TLE installed.\nPrevious age: %s   New age: %s\nTracking reloaded; prediction queued.",
              oldText, newText);
     lv_label_set_text(_tle_status, msg);
     lv_obj_set_style_text_color(_tle_status, lv_color_hex(C_GREEN), 0);
+}
+
+static void _checkTleUpdate(lv_event_t*) {
+    if (_tleRequestPending) return;
+    if (!TLEManager::filesystemReady() || !TLEValidation::timeReady(time(nullptr))) {
+        lv_label_set_text(_tle_status, !TLEManager::filesystemReady()
+                          ? "LittleFS unavailable. Upload the matching filesystem manually."
+                          : "WAITING FOR TIME - check WiFi/NTP first.");
+        return;
+    }
+    _tleRequestId = SatTracker::getState().noradId;
+    _tleRequestOldAge = SatTracker::getState().tleAgeHours;
+    char url[160];
+    snprintf(url, sizeof(url), "%s?CATNR=%lu&FORMAT=TLE", CELESTRAK_URL, (unsigned long)_tleRequestId);
+    if (!HttpUtils::startAsyncGet(url)) {
+        lv_label_set_text(_tle_status, "Network worker busy or unavailable. Try again later.");
+        return;
+    }
+    _tleRequestPending = true;
+    TLEManager::saveManualCheck(_tleRequestId);
+    lv_label_set_text(_tle_status, "Checking CelesTrak for this satellite...");
+    lv_obj_set_style_text_color(_tle_status, lv_color_hex(C_GOLD), 0);
+    lv_obj_add_state(_tle_check_btn, LV_STATE_DISABLED);
+    _tleResultLayout();
+}
+
+inline void serviceTleRequest() {
+    if (!_tleRequestPending) return;
+    String body;
+    int code;
+    if (!HttpUtils::takeAsyncResult(body, code)) return;
+    _tleRequestPending = false;
+    if (_tle_status && SatTracker::getState().noradId != _tleRequestId) {
+        lv_label_set_text(_tle_status, "Selection changed; check the selected satellite again.");
+        lv_obj_clear_state(_tle_check_btn, LV_STATE_DISABLED);
+        return;
+    }
+    if (_tle_status) _finishTleUpdate(_tleRequestId, _tleRequestOldAge, body, code);
 }
 
 static void _openTleModal(lv_event_t*) {
@@ -223,13 +239,13 @@ static void _openTleModal(lv_event_t*) {
     lv_obj_center(box);
     lv_obj_set_style_bg_color(box, lv_color_hex(C_HDR), 0);
     lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(box, lv_color_hex(C_SEC), 0);
-    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(C_BORDER), 0);
+    lv_obj_set_style_border_width(box, 1, 0);
     lv_obj_set_style_radius(box, 8, 0);
     lv_obj_set_style_pad_all(box, 0, 0);
     lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* title = mk_label(box, &lv_font_montserrat_20, C_SEC, 20, 14, "TLE DATA UPDATE");
+    lv_obj_t* title = mk_label(box, UI_F_HEAD, C_SEC, 20, 14, "TLE DATA UPDATE");
     lv_obj_set_width(title, 520);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
@@ -246,11 +262,11 @@ static void _openTleModal(lv_event_t*) {
     else
         snprintf(info, sizeof(info), "%s\nNORAD %lu     TLE age: %s     Last check: --:--",
                  s.name, (unsigned long)s.noradId, tleAgeText);
-    lv_obj_t* details = mk_label(box, &lv_font_montserrat_16, C_VAL, 20, 50, info);
+    lv_obj_t* details = mk_label(box, UI_F_BODY, C_VAL, 20, 50, info);
     lv_obj_set_width(details, 520);
     lv_obj_set_style_text_align(details, LV_TEXT_ALIGN_CENTER, 0);
 
-    _tle_status = mk_label(box, &lv_font_montserrat_14, C_GOLD, 30, 104,
+    _tle_status = mk_label(box, UI_F_LABEL, C_GOLD, 30, 104,
         "CelesTrak normally checks for new orbital data only every 2 hours.\n"
         "Too many requests may temporarily block your public IP address.\n"
         "Only this selected satellite will be checked.");
@@ -401,18 +417,21 @@ static void _buildProfile(const SatTracker::PassInfo& pass) {
 // ── Build ─────────────────────────────────────────────────────────────────────
 inline void build(lv_obj_t* panel) {
     _tracker_panel = panel;
-    const lv_font_t* F12 = &lv_font_montserrat_12;
-    const lv_font_t* FT  = &JetBrainsMono_Regular_20;
-    const lv_font_t* FBV = &JetBrainsMono_Bold_28;
+    // v2 typography: Inter labels, IBM Plex Mono values (fixed advance, so
+    // changing digits never shift neighbouring widgets).
+    const lv_font_t* F12 = UI_F_LABEL;      // compass / ring / small headers
+    const lv_font_t* FL  = UI_F_LABEL;      // field labels
+    const lv_font_t* FT  = UI_F_VAL;        // telemetry values
+    const lv_font_t* FBV = UI_F_BIG;        // AZ / EL
 
     // ── Column dividers ───────────────────────────────────────────────────────
     mk_panel(panel, COL_W - 1,         0, 1, CONTENT_H, C_DIV);
     mk_panel(panel, CONTENT_W - COL_W, 0, 1, CONTENT_H, C_DIV);
 
     // ── Left: orbit telemetry ─────────────────────────────────────────────────
-    mk_label(panel, FT, C_SEC, 8,  8, "ORBIT TELEMETRY");
-    mk_label(panel, FT, C_DIM, 8, 34, "TLE AGE");
-    lbl_tle_age = mk_label(panel, FT, C_VAL, 8, 34);
+    mk_label(panel, UI_F_HEAD, C_SEC, 8, 7, "ORBIT TELEMETRY");
+    mk_label(panel, FL, C_DIM, 8, 35, "TLE AGE");
+    lbl_tle_age = mk_label(panel, FT, C_TXT2, 8, 34);
     lv_obj_set_width(lbl_tle_age, COL_W - 16);
     lv_obj_set_style_text_align(lbl_tle_age, LV_TEXT_ALIGN_RIGHT, 0);
 
@@ -427,75 +446,75 @@ inline void build(lv_obj_t* panel) {
     lv_obj_add_flag(tle_age_hit, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(tle_age_hit, _openTleModal, LV_EVENT_CLICKED, nullptr);
 
-    mk_label(panel, F12, C_DIM, 8, 62, "LAST CHECK");
-    lbl_tle_check = mk_label(panel, FT, C_VAL, 8, 58);
+    mk_label(panel, FL, C_DIM, 8, 59, "LAST CHECK");
+    lbl_tle_check = mk_label(panel, FT, C_TXT2, 8, 58);
     lv_obj_set_width(lbl_tle_check, COL_W - 16);
     lv_obj_set_style_text_align(lbl_tle_check, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(panel, FT, C_DIM, 8, 82, "ORBIT");
-    lbl_orbit = mk_label(panel, FT, C_VAL, 8, 82);
+    mk_label(panel, FL, C_DIM, 8, 83, "ORBIT");
+    lbl_orbit = mk_label(panel, FT, C_TXT2, 8, 82);
     lv_obj_set_width(lbl_orbit, COL_W - 16);
     lv_obj_set_style_text_align(lbl_orbit, LV_TEXT_ALIGN_RIGHT, 0);
-    mk_label(panel, FT, C_DIM, 8, 106, "LAT");
+    mk_label(panel, FL, C_DIM, 8, 107, "LAT");
     lbl_lat = mk_label(panel, FT, C_VAL, 8, 106);
     lv_obj_set_width(lbl_lat, COL_W - 16);
     lv_obj_set_style_text_align(lbl_lat, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(panel, FT, C_DIM, 8, 130, "LON");
+    mk_label(panel, FL, C_DIM, 8, 131, "LON");
     lbl_lon = mk_label(panel, FT, C_VAL, 8, 130);
     lv_obj_set_width(lbl_lon, COL_W - 16);
     lv_obj_set_style_text_align(lbl_lon, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(panel, FT, C_DIM, 8, 154, "LOC");
-    lbl_loc = mk_label(panel, FT, C_VAL, 8, 154);
+    mk_label(panel, FL, C_DIM, 8, 155, "LOC");
+    lbl_loc = mk_label(panel, FT, C_TXT2, 8, 154);
     lv_obj_set_width(lbl_loc, COL_W - 16);
     lv_obj_set_style_text_align(lbl_loc, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(panel, FT, C_DIM, 8, 178, "ALT");
+    mk_label(panel, FL, C_DIM, 8, 179, "ALT");
     lbl_alt = mk_label(panel, FT, C_VAL, 8, 178);
     lv_obj_set_width(lbl_alt, COL_W - 16);
     lv_obj_set_style_text_align(lbl_alt, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(panel, FT, C_DIM, 8, 202, "RNG");
+    mk_label(panel, FL, C_DIM, 8, 203, "RNG");
     lbl_range = mk_label(panel, FT, C_VAL, 8, 202);
     lv_obj_set_width(lbl_range, COL_W - 16);
     lv_obj_set_style_text_align(lbl_range, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(panel, FT, C_DIM, 8, 226, "RRT");
-    lbl_range_rate = mk_label(panel, FT, C_VAL, 8, 226);
+    mk_label(panel, FL, C_DIM, 8, 227, "RRT");
+    lbl_range_rate = mk_label(panel, FT, C_TXT2, 8, 226);
     lv_obj_set_width(lbl_range_rate, COL_W - 16);
     lv_obj_set_style_text_align(lbl_range_rate, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(panel, FT, C_DIM, 8, 250, "SPD");
+    mk_label(panel, FL, C_DIM, 8, 251, "SPD");
     lbl_velocity = mk_label(panel, FT, C_VAL, 8, 250);
     lv_obj_set_width(lbl_velocity, COL_W - 16);
     lv_obj_set_style_text_align(lbl_velocity, LV_TEXT_ALIGN_RIGHT, 0);
 
-    mk_label(panel, FT, C_DIM, 8, 274, "DLY");
-    lbl_delay = mk_label(panel, FT, C_VAL, 8, 274);
+    mk_label(panel, FL, C_DIM, 8, 275, "DLY");
+    lbl_delay = mk_label(panel, FT, C_TXT2, 8, 274);
     lv_obj_set_width(lbl_delay, COL_W - 16);
     lv_obj_set_style_text_align(lbl_delay, LV_TEXT_ALIGN_RIGHT, 0);
-    mk_label(panel, FT,  C_DIM, 8,  298, "DOP");
-    mk_label(panel, &lv_font_montserrat_10, C_DIM, 47, 308, "100MHz");
-    lbl_doppler = mk_label(panel, FT, C_VAL, 8, 298);
+    mk_label(panel, FL, C_DIM, 8, 299, "DOP");
+    mk_label(panel, FL, C_DIM, 44, 299, "100MHz");
+    lbl_doppler = mk_label(panel, FT, C_TXT2, 8, 298);
     lv_obj_set_width(lbl_doppler, COL_W - 16);
     lv_obj_set_style_text_align(lbl_doppler, LV_TEXT_ALIGN_RIGHT, 0);
 
     mk_panel(panel, 8, 322, COL_W - 17, 1, C_DIV);
 
-    _lbl_rx_key = mk_label(panel, FT, C_DIM, 8, 326, "RX");
+    _lbl_rx_key = mk_label(panel, FL, C_DIM, 8, 327, "RX");
     _lbl_rx_val = mk_label(panel, FT, C_VAL, 8, 326);
     lv_obj_set_width(_lbl_rx_val, COL_W - 16);
     lv_obj_set_style_text_align(_lbl_rx_val, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_add_flag(_lbl_rx_key, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(_lbl_rx_val, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_lbl_rx_key, true);
+    ui_set_hidden(_lbl_rx_val, true);
 
-    _lbl_tx_key = mk_label(panel, FT, C_DIM, 8, 352, "TX");
+    _lbl_tx_key = mk_label(panel, FL, C_DIM, 8, 353, "TX");
     _lbl_tx_val = mk_label(panel, FT, C_VAL, 8, 352);
     lv_obj_set_width(_lbl_tx_val, COL_W - 16);
     lv_obj_set_style_text_align(_lbl_tx_val, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_add_flag(_lbl_tx_key, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(_lbl_tx_val, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_lbl_tx_key, true);
+    ui_set_hidden(_lbl_tx_val, true);
 
     // ── Center top: AZ / EL readout (each centered in its half) ──────────────
     // Thin divider between AZ and EL in the header area only
@@ -530,11 +549,11 @@ inline void build(lv_obj_t* panel) {
     _drawGrid();
 
     // "Please wait" label — centred over the polar, shown during pass computation
-    _lbl_computing = mk_label(panel, &lv_font_montserrat_16, C_SEC,
+    _lbl_computing = mk_label(panel, UI_F_BODY, C_SEC,
                               COL_W, PANEL_PCY - 10, "Please wait, computing...");
     lv_obj_set_width(_lbl_computing, CANVAS_W);
     lv_obj_set_style_text_align(_lbl_computing, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_add_flag(_lbl_computing, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_lbl_computing, true);
 
     // Compass labels (on panel, drawn above canvas)
     mk_label(panel, F12, C_DIM, PANEL_PCX - 5,          PANEL_PCY - PMAXR - 18, "N");
@@ -562,11 +581,11 @@ inline void build(lv_obj_t* panel) {
     lv_obj_set_style_border_width(_marker, 1, 0);
     lv_obj_set_style_pad_all(_marker, 0, 0);
     lv_obj_clear_flag(_marker, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(_marker, LV_OBJ_FLAG_HIDDEN);
+    ui_set_hidden(_marker, true);
 
     // ── Right: next pass / geostationary ─────────────────────────────────────
     const int RX = CONTENT_W - COL_W + 8;
-    lbl_pass_hdr = mk_label(panel, FT, C_SEC, CONTENT_W - COL_W, 8);
+    lbl_pass_hdr = mk_label(panel, UI_F_HEAD, C_SEC, CONTENT_W - COL_W, 7);
     lv_obj_set_width(lbl_pass_hdr, COL_W);
     lv_obj_set_style_text_align(lbl_pass_hdr, LV_TEXT_ALIGN_CENTER, 0);
     lbl_aos          = mk_label(panel, FT, C_GREEN, RX, 38);
@@ -576,11 +595,13 @@ inline void build(lv_obj_t* panel) {
     lbl_max_el       = mk_label(panel, FT, C_VAL,   RX, 142);
     lbl_pass_az      = mk_label(panel, FT, C_VAL,   RX, 168);
     lbl_countdown = mk_label(panel, FT, C_GOLD, CONTENT_W - COL_W, 194);
-    lv_obj_set_width(lbl_countdown, COL_W);
+    lv_obj_set_size(lbl_countdown, COL_W, lv_font_get_line_height(FT));
+    lv_label_set_long_mode(lbl_countdown, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(lbl_countdown, LV_TEXT_ALIGN_CENTER, 0);
 
     lbl_los_countdown = mk_label(panel, FT, C_RED, CONTENT_W - COL_W, 220);
-    lv_obj_set_width(lbl_los_countdown, COL_W);
+    lv_obj_set_size(lbl_los_countdown, COL_W, lv_font_get_line_height(FT));
+    lv_label_set_long_mode(lbl_los_countdown, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(lbl_los_countdown, LV_TEXT_ALIGN_CENTER, 0);
 
     // ── EME / Moon shortcut ────────────────────────────────────────────────────
@@ -591,11 +612,11 @@ inline void build(lv_obj_t* panel) {
         MoonWidget::build(panel, MOON_X, 252,
                           []() { if (onMoonTap) onMoonTap(); });
 
-        _eme_lbl = mk_label(panel, FT, C_SEC, CONTENT_W - COL_W, 324);
+        _eme_lbl = mk_label(panel, UI_F_LABEL, C_SEC, CONTENT_W - COL_W, 326);
         lv_obj_set_width(_eme_lbl, COL_W);
         lv_obj_set_style_text_align(_eme_lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(_eme_lbl, "EME");
-        lv_obj_add_flag(_eme_lbl, LV_OBJ_FLAG_HIDDEN);  // shown after thumbnail decodes
+        ui_set_hidden(_eme_lbl, true);  // shown after thumbnail decodes
     }
 
     // ── Select Sat button ─────────────────────────────────────────────────────
@@ -605,19 +626,19 @@ inline void build(lv_obj_t* panel) {
     lv_obj_set_size(sel_btn, BTN_W, 40);
     lv_obj_set_pos(sel_btn, BTN_X, 360);
     lv_obj_set_style_bg_color(sel_btn, lv_color_hex(C_HDR), 0);
-    lv_obj_set_style_bg_color(sel_btn, lv_color_hex(C_SEC), LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(sel_btn, lv_color_hex(C_SEC), 0);
-    lv_obj_set_style_border_width(sel_btn, 2, 0);
-    lv_obj_set_style_radius(sel_btn, 8, 0);
+    lv_obj_set_style_bg_color(sel_btn, lv_color_hex(C_CYAN), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(sel_btn, lv_color_hex(C_CYAN), 0);
+    lv_obj_set_style_border_width(sel_btn, 1, 0);
+    lv_obj_set_style_radius(sel_btn, 6, 0);
     lv_obj_set_style_pad_all(sel_btn, 0, 0);
     lv_obj_clear_flag(sel_btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(sel_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(sel_btn, [](lv_event_t*) { if (onSelectSat) onSelectSat(); }, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t* sel_lbl = lv_label_create(sel_btn);
-    lv_label_set_text(sel_lbl, "Select Sat");
-    lv_obj_set_style_text_font(sel_lbl, FT, 0);
-    lv_obj_set_style_text_color(sel_lbl, lv_color_hex(C_SEC), 0);
+    lv_label_set_text(sel_lbl, LV_SYMBOL_LIST "  SELECT SAT");
+    lv_obj_set_style_text_font(sel_lbl, UI_F_HEAD, 0);
+    lv_obj_set_style_text_color(sel_lbl, lv_color_hex(C_CYAN), 0);
     lv_obj_set_style_text_color(sel_lbl, lv_color_hex(C_BG), LV_STATE_PRESSED);
     lv_obj_center(sel_lbl);
 }
@@ -626,7 +647,7 @@ inline void onSatChanged() {
     _check_cache_id = 0;
     _check_cache_success = 0;
     _waitingForPass = true;
-    if (_lbl_computing) lv_obj_clear_flag(_lbl_computing, LV_OBJ_FLAG_HIDDEN);
+    if (_lbl_computing) ui_set_hidden(_lbl_computing, false);
 }
 
 // ── Update (called every second) ─────────────────────────────────────────────
@@ -636,32 +657,46 @@ inline void update() {
     // Show EME label only once the moon thumbnail has been decoded
     if (_eme_lbl && MoonWidget::_canvas &&
         !lv_obj_has_flag(MoonWidget::_canvas, LV_OBJ_FLAG_HIDDEN))
-        lv_obj_clear_flag(_eme_lbl, LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_eme_lbl, false);
 
     const SatTracker::State& s = SatTracker::getState();
 
-    if (_waitingForPass && (s.pass.valid || s.isGeo)) {
+    if (_waitingForPass && (s.pass.valid || s.isGeo || s.passSearchComplete || !s.tleLoaded || !s.timeValid || !s.observerValid)) {
         _waitingForPass = false;
-        lv_obj_add_flag(_lbl_computing, LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_lbl_computing, true);
     }
     char   buf[80];
     struct tm ti{};
     time_t t;
     time_t now   = time(nullptr);
-    bool   above = (s.elevation > 0.0);
+    bool   above = s.observerValid && (s.elevation > 0.0);
+
+    if (!s.telemetryValid) {
+        for (lv_obj_t* label : {lbl_lat, lbl_lon, lbl_loc, lbl_alt, lbl_range, lbl_range_rate,
+                               lbl_orbit, lbl_velocity, lbl_delay, lbl_doppler, lbl_tle_age,
+                               lbl_az_val, lbl_el_val}) _setText(label, "--");
+        _setText(lbl_tle_check, _lastSuccessfulCheck(s.noradId) > 0 ? "CHECKED" : "NEVER");
+        _setText(lbl_pass_hdr, "TRACKING STATUS");
+        _setText(lbl_countdown, SatTracker::dataStatus());
+        for (lv_obj_t* label : {lbl_aos, lbl_los, lbl_tca, lbl_duration, lbl_max_el,
+                               lbl_pass_az, lbl_los_countdown, _lbl_rx_val, _lbl_tx_val}) _setText(label, "--");
+        if (_marker) ui_set_hidden(_marker, true);
+        if (_lbl_computing) ui_set_hidden(_lbl_computing, true);
+        return;
+    }
 
     // AZ / EL header
     snprintf(buf, sizeof(buf), "%.1f\xc2\xb0 %s", s.azimuth, azCompass(s.azimuth));
-    lv_label_set_text(lbl_az_val, buf);
+    _setText(lbl_az_val, s.observerValid ? buf : "--");
 
     snprintf(buf, sizeof(buf), "%+.1f\xc2\xb0", s.elevation);
-    lv_label_set_text(lbl_el_val, buf);
-    lv_obj_set_style_text_color(lbl_az_val, lv_color_hex(above ? C_GREEN : C_RED), 0);
-    lv_obj_set_style_text_color(lbl_el_val, lv_color_hex(above ? C_GREEN : C_RED), 0);
+    _setText(lbl_el_val, s.observerValid ? buf : "--");
+    _setTextColor(lbl_az_val, above ? C_GREEN : C_RED);
+    _setTextColor(lbl_el_val, above ? C_GREEN : C_RED);
 
     // Left: telemetry
     _formatAgeHHMM(s.tleAgeHours, buf, sizeof(buf));
-    lv_label_set_text(lbl_tle_age, buf);
+    _setText(lbl_tle_age, buf);
 
     // Read LittleFS only when the selected satellite changes. The timestamp is
     // then kept in RAM; opening a file from this one-second UI loop made every
@@ -673,61 +708,61 @@ inline void update() {
     } else {
         snprintf(buf, sizeof(buf), "--:--");
     }
-    lv_label_set_text(lbl_tle_check, buf);
+    _setText(lbl_tle_check, buf);
 
     snprintf(buf, sizeof(buf), "%.2f %c", fabs(s.lat), s.lat >= 0 ? 'N' : 'S');
-    lv_label_set_text(lbl_lat, buf);
+    _setText(lbl_lat, buf);
 
     snprintf(buf, sizeof(buf), "%.2f %c", fabs(s.lon), s.lon >= 0 ? 'E' : 'W');
-    lv_label_set_text(lbl_lon, buf);
+    _setText(lbl_lon, buf);
 
     char loc[8]; _maidenhead(s.lat, s.lon, loc);
-    lv_label_set_text(lbl_loc, loc);
+    _setText(lbl_loc, loc);
 
     snprintf(buf, sizeof(buf), "%.0f km", s.alt);
-    lv_label_set_text(lbl_alt, buf);
+    _setText(lbl_alt, buf);
 
     snprintf(buf, sizeof(buf), "%.0f km", s.range);
-    lv_label_set_text(lbl_range, buf);
+    _setText(lbl_range, s.observerValid ? buf : "--");
 
     snprintf(buf, sizeof(buf), "%+.2f km/s", s.rangeRate);
-    lv_label_set_text(lbl_range_rate, buf);
+    _setText(lbl_range_rate, s.observerValid ? buf : "--");
 
     snprintf(buf, sizeof(buf), "%lu", (unsigned long)s.orbitNumber);
-    lv_label_set_text(lbl_orbit, buf);
+    _setText(lbl_orbit, buf);
 
     snprintf(buf, sizeof(buf), "%.2f km/s", s.velocity);
-    lv_label_set_text(lbl_velocity, buf);
+    _setText(lbl_velocity, buf);
 
     snprintf(buf, sizeof(buf), "%.1f ms", s.signalDelay);
-    lv_label_set_text(lbl_delay, buf);
+    _setText(lbl_delay, s.observerValid ? buf : "--");
 
     snprintf(buf, sizeof(buf), "%+.0f Hz", s.doppler100);
-    lv_label_set_text(lbl_doppler, buf);
+    _setText(lbl_doppler, s.observerValid ? buf : "--");
 
     // RX / TX frequencies with live Doppler correction
     const SatFreq* freq = getSatFreq(s.noradId);
-    if (freq && freq->downlinkMHz > 0.0) {
+    if (s.observerValid && freq && freq->downlinkMHz > 0.0) {
         double factor = 1.0 - s.rangeRate / 299792.458;
         _fmtFreq(buf, sizeof(buf), freq->downlinkMHz * factor, freq->mode);
-        lv_label_set_text(_lbl_rx_val, buf);
-        lv_obj_clear_flag(_lbl_rx_key, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(_lbl_rx_val, LV_OBJ_FLAG_HIDDEN);
+        _setText(_lbl_rx_val, buf);
+        ui_set_hidden(_lbl_rx_key, false);
+        ui_set_hidden(_lbl_rx_val, false);
 
         if (freq->uplinkMHz > 0.0) {
             _fmtFreq(buf, sizeof(buf), freq->uplinkMHz / factor, freq->mode);
-            lv_label_set_text(_lbl_tx_val, buf);
-            lv_obj_clear_flag(_lbl_tx_key, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_clear_flag(_lbl_tx_val, LV_OBJ_FLAG_HIDDEN);
+            _setText(_lbl_tx_val, buf);
+            ui_set_hidden(_lbl_tx_key, false);
+            ui_set_hidden(_lbl_tx_val, false);
         } else {
-            lv_obj_add_flag(_lbl_tx_key, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(_lbl_tx_val, LV_OBJ_FLAG_HIDDEN);
+            ui_set_hidden(_lbl_tx_key, true);
+            ui_set_hidden(_lbl_tx_val, true);
         }
     } else {
-        lv_obj_add_flag(_lbl_rx_key, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(_lbl_rx_val, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(_lbl_tx_key, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(_lbl_tx_val, LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_lbl_rx_key, true);
+        ui_set_hidden(_lbl_rx_val, true);
+        ui_set_hidden(_lbl_tx_key, true);
+        ui_set_hidden(_lbl_tx_val, true);
     }
 
     // Polar: clear canvas for GEO (grid only), rebuild arc for LEO when pass changes
@@ -746,59 +781,59 @@ inline void update() {
         int cx, cy; _toXY(s.azimuth, s.elevation, &cx, &cy);
         lv_obj_set_pos(_marker, COL_W + cx - 5, CANVAS_OFFSET_Y + cy - 5);
         _blinkOn = !_blinkOn;
-        if (_blinkOn) lv_obj_clear_flag(_marker, LV_OBJ_FLAG_HIDDEN);
+        if (_blinkOn) ui_set_hidden(_marker, false);
         else          lv_obj_add_flag  (_marker, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_add_flag(_marker, LV_OBJ_FLAG_HIDDEN);
+        ui_set_hidden(_marker, true);
         _blinkOn = true;
     }
 
     // Right: geostationary info or next pass
     if (s.isGeo) {
-        lv_label_set_text(lbl_pass_hdr, "GEOSTATIONARY");
+        _setText(lbl_pass_hdr, "GEOSTATIONARY");
 
         snprintf(buf, sizeof(buf), "LON  %.1f\xc2\xb0 %c",
                  fabs(s.lon), s.lon >= 0 ? 'E' : 'W');
-        lv_label_set_text(lbl_aos, buf);
+        _setText(lbl_aos, buf);
 
         snprintf(buf, sizeof(buf), "INC  %.2f\xc2\xb0", s.inclination);
-        lv_label_set_text(lbl_los, buf);
+        _setText(lbl_los, buf);
 
-        lv_label_set_text(lbl_tca,       "");
-        lv_label_set_text(lbl_duration, "");
-        lv_label_set_text(lbl_max_el,   "");
-        lv_label_set_text(lbl_pass_az,  "");
+        _setText(lbl_tca,       "");
+        _setText(lbl_duration, "");
+        _setText(lbl_max_el,   "");
+        _setText(lbl_pass_az,  "");
 
-        lv_label_set_text(lbl_countdown, "FIXED ORBIT");
-        lv_obj_set_style_text_color(lbl_countdown, lv_color_hex(C_SEC), 0);
-        lv_label_set_text(lbl_los_countdown, "");
+        _setText(lbl_countdown, "FIXED ORBIT");
+        _setTextColor(lbl_countdown, C_SEC);
+        _setText(lbl_los_countdown, "");
 
     } else {
-        lv_label_set_text(lbl_pass_hdr, "NEXT PASS");
+        _setText(lbl_pass_hdr, "NEXT PASS");
 
         if (s.pass.valid) {
             t = s.pass.start; localtime_r(&t, &ti);
             strftime(buf, sizeof(buf), "AOS  %H:%M:%S", &ti);
-            lv_label_set_text(lbl_aos, buf);
+            _setText(lbl_aos, buf);
 
             t = s.pass.maxTime; localtime_r(&t, &ti);
             strftime(buf, sizeof(buf), "TCA  %H:%M:%S", &ti);
-            lv_label_set_text(lbl_tca, buf);
+            _setText(lbl_tca, buf);
 
             t = s.pass.stop; localtime_r(&t, &ti);
             strftime(buf, sizeof(buf), "LOS  %H:%M:%S", &ti);
-            lv_label_set_text(lbl_los, buf);
+            _setText(lbl_los, buf);
 
             int dur = (int)(s.pass.stop - s.pass.start);
             snprintf(buf, sizeof(buf), "DUR  %dm %02ds", dur / 60, dur % 60);
-            lv_label_set_text(lbl_duration, buf);
+            _setText(lbl_duration, buf);
 
             snprintf(buf, sizeof(buf), "MAX  %.1f\xc2\xb0", s.pass.maxEl);
-            lv_label_set_text(lbl_max_el, buf);
+            _setText(lbl_max_el, buf);
 
             snprintf(buf, sizeof(buf), "AZ %.0f\xc2\xb0->%.0f\xc2\xb0",
                      s.pass.azStart, s.pass.azStop);
-            lv_label_set_text(lbl_pass_az, buf);
+            _setText(lbl_pass_az, buf);
 
             if (now < s.pass.start) {
                 int secs = (int)(s.pass.start - now);
@@ -806,31 +841,31 @@ inline void update() {
                 if (h > 0)      snprintf(buf, sizeof(buf), "in %dh %02dm %02ds", h, m, sc);
                 else if (m > 0) snprintf(buf, sizeof(buf), "in %dm %02ds", m, sc);
                 else            snprintf(buf, sizeof(buf), "in %ds", sc);
-                lv_label_set_text(lbl_countdown, buf);
-                lv_obj_set_style_text_color(lbl_countdown, lv_color_hex(C_GOLD), 0);
-                lv_label_set_text(lbl_los_countdown, "");
+                _setText(lbl_countdown, buf);
+                _setTextColor(lbl_countdown, C_GOLD);
+                _setText(lbl_los_countdown, "");
             } else if (now <= s.pass.stop) {
-                lv_label_set_text(lbl_countdown, "IN PASS");
-                lv_obj_set_style_text_color(lbl_countdown, lv_color_hex(C_GREEN), 0);
+                _setText(lbl_countdown, "IN PASS");
+                _setTextColor(lbl_countdown, C_GREEN);
                 int secs = (int)(s.pass.stop - now);
                 int m = secs / 60, sc = secs % 60;
                 snprintf(buf, sizeof(buf), "LOS in %dm %02ds", m, sc);
-                lv_label_set_text(lbl_los_countdown, buf);
+                _setText(lbl_los_countdown, buf);
             } else {
-                lv_label_set_text(lbl_countdown, "PASS COMPLETE");
-                lv_obj_set_style_text_color(lbl_countdown, lv_color_hex(C_DIM), 0);
-                lv_label_set_text(lbl_los_countdown, "");
+                _setText(lbl_countdown, "PASS COMPLETE");
+                _setTextColor(lbl_countdown, C_DIM);
+                _setText(lbl_los_countdown, "");
             }
         } else {
-            lv_label_set_text(lbl_aos,       "AOS  --:--:--");
-            lv_label_set_text(lbl_los,       "LOS  --:--:--");
-            lv_label_set_text(lbl_tca,       "TCA  --:--:--");
-            lv_label_set_text(lbl_duration,  "DUR  --");
-            lv_label_set_text(lbl_max_el,    "MAX  --");
-            lv_label_set_text(lbl_pass_az,   "AZ   --");
-            lv_label_set_text(lbl_countdown, "Computing...");
-            lv_obj_set_style_text_color(lbl_countdown, lv_color_hex(C_DIM), 0);
-            lv_label_set_text(lbl_los_countdown, "");
+            _setText(lbl_aos,       "AOS  --:--:--");
+            _setText(lbl_los,       "LOS  --:--:--");
+            _setText(lbl_tca,       "TCA  --:--:--");
+            _setText(lbl_duration,  "DUR  --");
+            _setText(lbl_max_el,    "MAX  --");
+            _setText(lbl_pass_az,   "AZ   --");
+            _setText(lbl_countdown, SatTracker::passStatus());
+            _setTextColor(lbl_countdown, C_DIM);
+            _setText(lbl_los_countdown, "");
         }
     }
 }
