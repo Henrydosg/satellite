@@ -33,6 +33,19 @@ Display pins, RGB timing (14 MHz), CH422G and PSRAM settings are unchanged from 
 `uploadfs` for LittleFS on a fresh board). The web installer and OTA releases linked below belong to the
 original 16 MB project and do **not** match this 8 MB layout.
 
+**OTA updates for this clone:** the on-device **SETUP → FIRMWARE UPDATE** page checks the releases of
+[Henrydosg/satellite](https://github.com/Henrydosg/satellite/releases) (set by `OTA_GITHUB_OWNER` /
+`OTA_GITHUB_REPO` in `platformio.ini`), not the original project. To publish an update:
+
+1. Commit and push the changes to `main`.
+2. Tag a higher version and push the tag, e.g. `git tag v3.0.1` then `git push henry v3.0.1`
+   (`henry` = the remote for this repo).
+3. The `Release firmware (OTA)` GitHub Action builds `firmware.bin` for this 8 MB layout and publishes the
+   release. The device then offers the update when the tag is newer than its own version (`MAJOR.MINOR.PATCH`).
+
+Releases attach only `firmware.bin`; OTA never rewrites LittleFS (map image, cached TLEs). The first
+firmware with this setting must be flashed over USB once.
+
 ---
 
 This project turns an 800×480 touchscreen into a self-contained satellite tracking console for amateur, weather, CubeSat, ISS, and geostationary satellites. It handles Wi-Fi onboarding, automatic geolocation, NTP time sync, TLE download and caching, SGP4 orbit propagation, pass prediction, an HTTP tracking API, live screenshots, browser flashing, and on-device firmware updates.

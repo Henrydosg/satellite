@@ -1,0 +1,48 @@
+name: Release firmware (OTA)
+
+# Push a version tag (for example v3.0.1) to build the DISPLAY firmware for this
+# 8 MB board and publish it as a GitHub Release. The device's
+# SETUP -> FIRMWARE UPDATE page installs the newest release's firmware.bin.
+#
+# Only firmware.bin is attached. littlefs.bin is deliberately NOT attached, so an
+# OTA update never rewrites the filesystem (map image, cached TLEs).
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history and tags so get_version.py sees the tag
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.cache/pip
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+          restore-keys: ${{ runner.os }}-pio-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware
+        run: pio run -e DISPLAY
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: .pio/build/DISPLAY/firmware.bin
+          generate_release_notes: true
